@@ -163,31 +163,55 @@ def prompt_and_kill() -> None:
         if any(w in name.lower() for w in WARN_UNSAVED):
             console.print(f"[yellow]⚠  {name} may have unsaved data.[/]")
 
-    console.print("\nClose these? [[bold]a[/]]ll / [[bold]n[/]]one / comma-separated numbers")
-    try:
-        choice = input("> ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        return
+    console.print()
 
-    to_kill: List[Tuple[List[int], str]] = []
-    if choice == "a":
-        to_kill = [(pids, name) for _, name, _, pids, _, _, _ in groups]
-    elif choice == "n" or not choice:
-        return
-    else:
-        indices = [int(x.strip()) - 1 for x in choice.split(",") if x.strip().isdigit()]
-        to_kill = [(groups[i][3], groups[i][1]) for i in indices if 0 <= i < len(groups)]
+    killed_any = False
+    remaining = list(groups)  # mutable copy so we can shrink it
 
-    for pids, name in to_kill:
-        killed = 0
-        for pid in pids:
-            try:
-                psutil.Process(pid).terminate()
-                killed += 1
-            except Exception:
-                pass
-        n = f"{killed} process{'es' if killed != 1 else ''}"
-        console.print(f"[green]Terminated {name} ({n})[/]")
+    while remaining:
+        console.print(
+            f"  Enter the [bold]number[/] of the process to close "
+            f"(1–{len(remaining)}), or [bold]n[/] to stop:"
+        )
+        try:
+            choice = input("> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            break
 
-    if to_kill:
+        if choice in ("n", "q", ""):
+            break
+
+        if choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(remaining):
+                key, name, desc, pids, ram, vram, has_gpu = remaining[idx]
+                killed = 0
+                for pid in pids:
+                    try:
+                        psutil.Process(pid).terminate()
+                        killed += 1
+                    except Exception:
+                        pass
+                n_str = f"{killed} process{'es' if killed != 1 else ''}"
+                console.print(f"  [green]Terminated {name} ({n_str})[/]")
+                remaining.pop(idx)
+                killed_any = True
+                # Reprint remaining table
+                if remaining:
+                    console.print()
+                    new_table = Table(box=box.ROUNDED)
+                    new_table.add_column("#", style="dim", width=3)
+                    new_table.add_column("App")
+                    new_table.add_column("VRAM (MB)", justify="right")
+                    new_table.add_column("RAM (MB)", justify="right")
+                    for j, (_, nm, _, _, rm, vm, hg) in enumerate(remaining, 1):
+                        v = f"[yellow]{vm}[/]" if vm > 0 else "[dim]—[/]"
+                        new_table.add_row(str(j), nm, v, f"{rm:.0f}")
+                    console.print(new_table)
+            else:
+                console.print(f"  [red]Enter 1–{len(remaining)} or n.[/]")
+        else:
+            console.print(f"  [red]Enter a number or n.[/]")
+
+    if killed_any:
         time.sleep(2)

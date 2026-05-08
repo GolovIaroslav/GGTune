@@ -87,14 +87,22 @@ def main_menu() -> None:
 
 # ── Screen 1: Scan ────────────────────────────────────────────────────────
 
-def _scan_gguf_files() -> List[Tuple[str, int]]:
-    """Return list of (path, size_bytes) for found .gguf models."""
+MODEL_EXTENSIONS = {".gguf", ".bin"}
+
+
+def _scan_gguf_files(search_method: str = "locate") -> List[Tuple[str, int]]:
+    """Return list of (path, size_bytes) for found GGUF-compatible models.
+
+    search_method: "locate" (fast, index-based) or "find" (thorough, real-time)
+    """
     found: dict[str, int] = {}
 
     def _add(p: Path) -> None:
-        n = p.name.lower()
-        if p.suffix != ".gguf" or not p.is_file():
+        if not p.is_file():
             return
+        if p.suffix.lower() not in MODEL_EXTENSIONS:
+            return
+        n = p.name.lower()
         if "mmproj" in n or "ggml-vocab" in n:
             return
         if p.stat().st_size < 50 * 1024 * 1024:
@@ -102,40 +110,105 @@ def _scan_gguf_files() -> List[Tuple[str, int]]:
         found[str(p)] = p.stat().st_size
 
     home = Path.home()
-    for d in [
-        home / "models", home / "Downloads",
+    sys = platform.system()
+
+    # Common directories across all platforms
+    common_dirs = [
+        home / "models",
+        home / "Downloads",
         home / ".cache" / "lm-studio" / "models",
         home / ".local" / "share" / "models",
-        Path("/data"),
-    ]:
-        if d.exists():
-            for f in d.rglob("*.gguf"):
-                _add(f)
+    ]
 
-    if platform.system() in ("Linux", "Darwin"):
-        try:
-            r = subprocess.run(
-                ["locate", "-r", r"\.gguf$"],
-                capture_output=True, text=True, timeout=12,
-            )
-            for line in r.stdout.splitlines():
-                _add(Path(line.strip()))
-        except Exception:
-            pass
+    if sys == "Windows":
+        common_dirs += [
+            home / "Documents" / "models",
+            home / "Desktop",
+            home / "AppData" / "Local" / "LM Studio" / "models",
+            home / ".ollama" / "models",
+        ]
+        # Also scan drive roots D:\, E:\ (C:\ is slow and mostly system files)
+        import string
+        for drive in string.ascii_uppercase[3:8]:  # D: through H:
+            d = Path(f"{drive}:\\")
+            if d.exists():
+                common_dirs.append(d / "models")
+                common_dirs.append(d / "AI" / "models")
+    else:
+        common_dirs.append(Path("/data"))
+        common_dirs.append(home / ".ollama" / "models")
+
+    for d in common_dirs:
+        if d.exists():
+            for ext in MODEL_EXTENSIONS:
+                for f in d.rglob(f"*{ext}"):
+                    _add(f)
+
+    if sys in ("Linux", "Darwin"):
+        if search_method == "find":
+            try:
+                args = ["find", str(home), "-type", "f"]
+                for ext in MODEL_EXTENSIONS:
+                    args += ["-name", f"*{ext}", "-o"]
+                args.pop()  # remove trailing -o
+                r = subprocess.run(args, capture_output=True, text=True, timeout=120)
+                for line in r.stdout.splitlines():
+                    _add(Path(line.strip()))
+            except Exception:
+                pass
+        else:  # locate
+            for ext in MODEL_EXTENSIONS:
+                try:
+                    r = subprocess.run(
+                        ["locate", "-r", rf"\{ext}$"],
+                        capture_output=True, text=True, timeout=12,
+                    )
+                    for line in r.stdout.splitlines():
+                        _add(Path(line.strip()))
+                except Exception:
+                    pass
 
     return sorted(found.items(), key=lambda x: -x[1])
+
+
+def _truncate_path(path: str, max_len: int = 55) -> str:
+    """Show only the rightmost part of a path if it's too long."""
+    if len(path) <= max_len:
+        return path
+    return "…" + path[-(max_len - 1):]
 
 
 def _screen_scan() -> Optional[str]:
     _clear()
     _banner("Scan for Models")
-    console.print("[dim]Searching standard locations + locate index...[/]\n")
 
-    items = _scan_gguf_files()
+    # On Linux/macOS let user pick locate vs find
+    search_method = "locate"
+    if platform.system() in ("Linux", "Darwin"):
+        console.print(Panel(
+            "  [bold cyan][1][/]  [bold]locate[/]  [dim]— fast (uses file index, may miss recently downloaded files)[/]\n"
+            "  [bold cyan][2][/]  [bold]find[/]    [dim]— thorough (scans your home folder in real time, slower ~30s)[/]",
+            title="[bold]Search method[/]",
+            border_style="dim",
+            padding=(1, 4),
+            width=WIDTH,
+        ))
+        m = _ask("Choice [1/2]: ")
+        if m == "2":
+            search_method = "find"
+            console.print("[dim]Running find (this may take up to 30 seconds)...[/]\n")
+        else:
+            console.print("[dim]Searching via locate index...[/]\n")
+    else:
+        console.print("[dim]Scanning standard locations...[/]\n")
+
+    items = _scan_gguf_files(search_method)
 
     if not items:
-        console.print("[yellow]No .gguf models found.[/]")
-        console.print("[dim]Try option 2 (manual path) or 3 (HuggingFace browse).[/]")
+        console.print("[yellow]No models found.[/]")
+        if search_method == "locate":
+            console.print("[dim]Tip: if you just downloaded a model, try scan again with [bold]find[/] (option 2).[/]")
+        console.print("[dim]Or use option 2 (manual path) or 3 (HuggingFace browse).[/]")
         _ask("\nPress Enter to go back")
         return None
 
@@ -148,7 +221,7 @@ def _screen_scan() -> Optional[str]:
     table.add_column("Path")
 
     for i, (fpath, size) in enumerate(items, 1):
-        table.add_row(str(i), f"{size / 1e9:.1f} GB", fpath)
+        table.add_row(str(i), f"{size / 1e9:.1f} GB", _truncate_path(fpath))
 
     console.print(table)
     console.print(f"\n  Found [bold]{len(items)}[/] model(s).")
@@ -179,10 +252,15 @@ def _screen_manual_path() -> Optional[str]:
         if raw.lower() in ("b", ""):
             return None
         p = Path(raw)
-        if p.exists() and p.suffix == ".gguf":
+        if p.exists() and p.is_file():
+            if p.suffix.lower() not in MODEL_EXTENSIONS:
+                console.print(
+                    f"  [yellow]Warning: extension '{p.suffix}' is unusual.[/] "
+                    "GGTune supports GGUF format. Trying anyway..."
+                )
             return str(p)
-        if p.exists():
-            console.print(f"  [red]Not a .gguf file.[/]")
+        elif p.exists():
+            console.print(f"  [red]Not a file:[/] {raw}")
         else:
             console.print(f"  [red]File not found:[/] {raw}")
 

@@ -58,14 +58,25 @@ def _find_binary(name: str) -> Optional[Path]:
 
 
 def _get_build_version(llama_cli: Path, env: dict) -> Optional[str]:
+    import re
     try:
         result = subprocess.run(
             [str(llama_cli), "--version"],
             capture_output=True, text=True, timeout=10, env=env,
         )
-        for token in result.stdout.split() + result.stderr.split():
+        combined = result.stdout + result.stderr
+        # "bNNNN" token (most common)
+        for token in combined.split():
             if token.startswith("b") and token[1:].isdigit():
                 return token
+        # "version: NNNN" or "build: NNNN"
+        m = re.search(r'(?:version|build)[:\s]+(\d{3,6})', combined, re.IGNORECASE)
+        if m:
+            return f"b{m.group(1)}"
+        # bare 4-5 digit build number
+        m = re.search(r'\b(\d{4,5})\b', combined)
+        if m:
+            return f"b{m.group(1)}"
     except Exception:
         pass
     return None
