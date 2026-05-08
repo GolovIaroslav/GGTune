@@ -1,5 +1,6 @@
 import subprocess
 import os
+import platform
 from typing import Optional
 
 
@@ -29,6 +30,7 @@ def run_checked(cmd: list[str], **kwargs) -> str:
 
 def make_env_with_lib(bin_dir: str) -> dict:
     env = os.environ.copy()
-    existing = env.get("LD_LIBRARY_PATH", "")
-    env["LD_LIBRARY_PATH"] = f"{bin_dir}:{existing}" if existing else bin_dir
+    if platform.system() != "Windows":
+        existing = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = f"{bin_dir}:{existing}" if existing else bin_dir
     return env

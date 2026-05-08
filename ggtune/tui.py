@@ -21,7 +21,8 @@ def _clear() -> None:
 
 def _ask(prompt: str = "> ") -> str:
     try:
-        console.print(f"[bold cyan]{prompt}[/]", end="")
+        from rich.markup import escape as _esc
+        console.print(f"[bold cyan]{_esc(prompt)}[/]", end="")
         return input().strip()
     except (EOFError, KeyboardInterrupt):
         return "q"
@@ -270,11 +271,11 @@ def _screen_models() -> Optional[str]:
                         model_tracker.remove(tm.path, delete_file=False)
                         console.print("[green]✓ Removed from list.[/]")
                     elif action == "x":
-                        if _ask(f"  Delete {tm.filename}? [y/N]: ").lower() == "y":
+                        if _ask(f"  Delete {tm.filename}? (y/n): ").lower() == "y":
                             model_tracker.remove(tm.path, delete_file=True)
                             console.print("[green]✓ Deleted.[/]")
                 else:
-                    if _ask(f"  Delete {target['filename']}? [y/N]: ").lower() == "y":
+                    if _ask(f"  Delete {target['filename']}? (y/n): ").lower() == "y":
                         model_tracker.remove(tm.path)
                         console.print("[green]✓ Deleted.[/]")
             else:
@@ -794,13 +795,13 @@ def _resolve_mmproj(model_path: str) -> Optional[str]:
     # Check tracker first
     tracked = model_tracker.find_by_path(model_path)
     if tracked and tracked.mmproj_path and Path(tracked.mmproj_path).exists():
-        use = _ask(f"  Vision file detected ({Path(tracked.mmproj_path).name}). Include in launch command? [y/N]: ")
+        use = _ask(f"  Vision file detected ({Path(tracked.mmproj_path).name}). Include in launch command? (y/n): ")
         return tracked.mmproj_path if use.lower() == "y" else None
 
     # Check same directory for mmproj files
     mp = model_tracker._find_mmproj_near(Path(model_path))
     if mp:
-        use = _ask(f"  Vision file found nearby ({mp.name}). Include in launch command? [y/N]: ")
+        use = _ask(f"  Vision file found nearby ({mp.name}). Include in launch command? (y/n): ")
         if use.lower() == "y":
             model_tracker.set_mmproj(model_path, str(mp))
             return str(mp)
@@ -862,19 +863,18 @@ def _screen_llama_update() -> None:
         console.print("  [dim]Could not reach GitHub.[/]")
 
     console.print()
-    menu = "  [bold cyan][1][/]  Install / rebuild llama.cpp"
-    if env:
-        menu += f"  [dim](currently {current_build}, ~10 min build from source)[/]"
+    from ggtune.config import LLAMA_CPP_PINNED_BUILD
+    menu = f"  [bold cyan][1][/]  Install stable build  [dim](tested: {LLAMA_CPP_PINNED_BUILD}, ~10 min from source)[/]"
     menu += "\n  [bold cyan][2][/]  Re-scan  [dim](clear cached path, search again)[/]"
     menu += "\n  [bold cyan][b][/]  Back"
     console.print(Panel(menu, border_style="dim", padding=(1, 4), width=WIDTH))
 
     choice = _ask("Choice: ")
     if choice == "1":
-        console.print("[dim]Building llama.cpp — this may take 5–20 minutes...[/]")
+        console.print(f"[dim]Building llama.cpp {LLAMA_CPP_PINNED_BUILD} — this may take 5–20 minutes...[/]")
         try:
             env_manager.install(hw)
-            console.print("[green]✓ Done![/]")
+            console.print(f"[green]✓ Done! Installed {LLAMA_CPP_PINNED_BUILD}.[/]")
         except Exception as e:
             console.print(f"[red]Build failed: {e}[/]")
     elif choice == "2":
@@ -882,7 +882,7 @@ def _screen_llama_update() -> None:
         console.print("  [dim]Cache cleared. Searching...[/]")
         try:
             env2 = env_manager.detect(hw)
-            console.print(f"  [green]✓ Found:[/] {env2.bin_dir}  [dim](via {env2.found_via})[/]")
+            console.print(f"  [green]✓ Found:[/] {env2.bin_dir}  [dim](build {env2.build}, via {env2.found_via})[/]")
         except RuntimeError as e:
             console.print(f"  [red]Not found: {e}[/]")
     _ask("\nPress Enter to go back")
@@ -912,7 +912,16 @@ def _screen_compat() -> None:
         if report.all_critical_passed:
             console.print("\n[green]✓ All critical tests passed.[/]")
         else:
-            console.print("\n[red]✗ Critical tests failed — run option 6 to rebuild.[/]")
+            console.print("\n[red]✗ Critical tests failed.[/]")
+            from ggtune.config import LLAMA_CPP_PINNED_BUILD
+            fix = _ask(f"  Install stable build ({LLAMA_CPP_PINNED_BUILD}, tested)? (y/n): ")
+            if fix.lower() == "y":
+                console.print(f"[dim]Building {LLAMA_CPP_PINNED_BUILD} — 5–20 min...[/]")
+                try:
+                    env_manager.install(hw)
+                    console.print(f"[green]✓ Stable build {LLAMA_CPP_PINNED_BUILD} installed.[/]")
+                except Exception as be:
+                    console.print(f"[red]Build failed: {be}[/]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
 
@@ -934,7 +943,7 @@ def _screen_clear_profiles() -> None:
         return
 
     console.print(f"  This will delete [bold]{len(profiles)}[/] saved profile(s).")
-    confirm = _ask("  Are you sure? [y/N]: ")
+    confirm = _ask("  Are you sure? (y/n): ")
     if confirm.lower() == "y":
         try:
             deleted = profile_storage.delete_all()

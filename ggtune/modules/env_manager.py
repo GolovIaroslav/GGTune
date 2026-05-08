@@ -342,7 +342,15 @@ def _build_llama_cpp(backend: Backend, target_build: str, install_dir: Path) -> 
             f"-j{os.cpu_count()}", cwd=install_dir, timeout=1800)
         p.advance(t)
 
-        bin_dir = install_dir / "build" / "bin"
+        if _SYSTEM == "Windows":
+            bin_dir = next(
+                (install_dir / sub for sub in [
+                    "build/bin/Release", "build/Release", "build/bin"
+                ] if (install_dir / sub / "llama-bench.exe").exists()),
+                install_dir / "build" / "bin" / "Release",
+            )
+        else:
+            bin_dir = install_dir / "build" / "bin"
         p.advance(t)
 
     return bin_dir

@@ -1,6 +1,9 @@
 """Module 8: Advisor & Output — interpret results, print report."""
 import os
+import platform
 from pathlib import Path
+
+_SYSTEM = platform.system()
 
 from rich.console import Console
 from rich.panel import Panel
@@ -65,9 +68,13 @@ def generate_launch_cmd(
         "--port 8080",
     ]
 
-    flags_str = " \\\n  ".join(flags)
-    ld = f"LD_LIBRARY_PATH={env_cfg.bin_dir}:$LD_LIBRARY_PATH"
-    return f"{ld} \\\n  {env_cfg.llama_server_path} \\\n  {flags_str}"
+    if _SYSTEM == "Windows":
+        flags_str = " ^\n  ".join(flags)
+        return f"{env_cfg.llama_server_path} ^\n  {flags_str}"
+    else:
+        flags_str = " \\\n  ".join(flags)
+        ld = f"LD_LIBRARY_PATH={env_cfg.bin_dir}:$LD_LIBRARY_PATH"
+        return f"{ld} \\\n  {env_cfg.llama_server_path} \\\n  {flags_str}"
 
 
 def _build_diagnostics(
