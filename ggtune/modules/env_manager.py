@@ -116,7 +116,8 @@ def _find_via_system_search(name: str) -> Optional[Path]:
     try:
         r = subprocess.run(
             ["find"] + search_roots + ["-name", exe_name, "-type", "f"],
-            capture_output=True, text=True, timeout=30, stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=30,
         )
         for line in r.stdout.splitlines():
             p = Path(line.strip())
@@ -573,9 +574,7 @@ def download_prebuilt(backend: Backend, build: str, install_dir: Path) -> Option
 # ── Build from source ──────────────────────────────────────────────────────
 
 def _build_llama_cpp(backend: Backend, target_build: str, install_dir: Path) -> Path:
-    from rich.console import Console
-    console = Console()
-
+    """Build llama.cpp from source. Always uses a fresh clone → swap to avoid stale cmake cache."""
     cmake_flags = {
         Backend.CUDA:  ["-DGGML_CUDA=ON"],
         Backend.ROCM:  ["-DGGML_HIPBLAS=ON"],
@@ -588,51 +587,44 @@ def _build_llama_cpp(backend: Backend, target_build: str, install_dir: Path) -> 
         if result.returncode != 0:
             raise RuntimeError(f"{cmd[0]} failed (exit {result.returncode})")
 
-    with Progress(SpinnerColumn(), TextColumn("{task.description}"), BarColumn()) as p:
-        t = p.add_task("Setting up llama.cpp...", total=4)
+    # Build into a temp dir so a failure never corrupts the live install
+    tmp_dir = install_dir.parent / f"llama.cpp.building"
+    if tmp_dir.exists():
+        shutil.rmtree(str(tmp_dir))
 
-        if install_dir.exists():
-            # Try to fetch just the target tag (works on shallow clones)
-            try:
-                run("git", "-C", str(install_dir),
-                    "fetch", "--depth=1", "--no-tags", "origin",
-                    f"refs/tags/{target_build}:refs/tags/{target_build}",
-                    timeout=120)
-                run("git", "-C", str(install_dir), "checkout", target_build, timeout=30)
-            except RuntimeError:
-                # Fresh clone as fallback
-                console.print(f"  [dim]Fetch failed, doing fresh clone of {target_build}...[/]")
-                shutil.rmtree(str(install_dir))
-                install_dir.parent.mkdir(parents=True, exist_ok=True)
-                run("git", "clone", "--depth=1", "--branch", target_build,
-                    LLAMA_CPP_REPO, str(install_dir), timeout=600)
-        else:
-            install_dir.parent.mkdir(parents=True, exist_ok=True)
-            run("git", "clone", "--depth=1", "--branch", target_build,
-                LLAMA_CPP_REPO, str(install_dir), timeout=600)
+    with Progress(SpinnerColumn(), TextColumn("{task.description}"), BarColumn()) as p:
+        t = p.add_task(f"Building llama.cpp {target_build}...", total=4)
+
+        install_dir.parent.mkdir(parents=True, exist_ok=True)
+        run("git", "clone", "--depth=1", "--branch", target_build,
+            LLAMA_CPP_REPO, str(tmp_dir), timeout=600)
         p.advance(t)
 
         run("cmake", "-B", "build", "-DCMAKE_BUILD_TYPE=Release", *cmake_flags,
-            cwd=install_dir, timeout=120)
+            cwd=tmp_dir, timeout=120)
         p.advance(t)
 
         run("cmake", "--build", "build", "--config", "Release",
-            f"-j{os.cpu_count()}", cwd=install_dir, timeout=1800)
+            f"-j{os.cpu_count()}", cwd=tmp_dir, timeout=1800)
         p.advance(t)
 
         # Locate bin dir (Windows MSVC uses build/bin/Release)
         if _SYSTEM == "Windows":
-            bin_dir = next(
-                (install_dir / sub for sub in [
-                    "build/bin/Release", "build/Release", "build/bin"
-                ] if (install_dir / sub / "llama-bench.exe").exists()),
-                install_dir / "build" / "bin" / "Release",
+            bin_dir_rel = next(
+                (sub for sub in ["build/bin/Release", "build/Release", "build/bin"]
+                 if (tmp_dir / sub / "llama-bench.exe").exists()),
+                "build/bin/Release",
             )
         else:
-            bin_dir = install_dir / "build" / "bin"
+            bin_dir_rel = "build/bin"
+
+        # Swap: remove old install, move tmp into place
+        if install_dir.exists():
+            shutil.rmtree(str(install_dir))
+        shutil.move(str(tmp_dir), str(install_dir))
         p.advance(t)
 
-    return bin_dir
+    return install_dir / bin_dir_rel
 
 
 def install(hw: HardwareProfile, build: str = LLAMA_CPP_PINNED_BUILD) -> EnvConfig:
