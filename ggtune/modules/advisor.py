@@ -95,6 +95,109 @@ def _write_alias(alias_line: str, shell: str, model_name: str) -> bool:
         return False
 
 
+def _build_diagnostics(
+    hw: HardwareProfile,
+    model: ModelProfile,
+    result: dict,
+    env_cfg: EnvConfig,
+) -> list:
+    """Return list of Rich-formatted diagnostic lines."""
+    from ggtune.modules.search_space_builder import kv_mb_per_token
+
+    params = result["best_params"]
+    tg = result["tg_tokens_per_sec"]
+    ctx = result.get("optimal_ctx", 8192)
+    cv = result.get("stability_cv", 0.0)
+    max_cpu = result.get("thermal_max_cpu", 0.0)
+    max_gpu = result.get("thermal_max_gpu", 0.0)
+
+    lines = ["[bold cyan]DIAGNOSTICS[/]"]
+
+    # Speed assessment
+    if tg < 5:
+        lines.append("  [red]✗ TG < 5 t/s — too slow for real-time use. "
+                     "Try a smaller/lower-quant model.[/]")
+    elif tg < 15:
+        lines.append(f"  [yellow]⚠  TG {tg:.1f} t/s — usable but slow. "
+                     "Consider smaller quantization or fewer context tokens.[/]")
+    else:
+        lines.append(f"  [green]✓ TG {tg:.1f} t/s — good for real-time generation.[/]")
+
+    # Stability
+    if cv > 0.15:
+        lines.append(f"  [yellow]⚠  High variance (CV={cv:.0%}) — background load interferes. "
+                     "Close other apps and re-run.[/]")
+
+    # VRAM vs model size
+    vram_gb = hw.vram_total_mb / 1024
+    if model.file_size_gb > vram_gb:
+        offload_gb = model.file_size_gb - vram_gb
+        lines.append(f"  [yellow]⚠  Model {model.file_size_gb:.1f}GB > VRAM {vram_gb:.1f}GB — "
+                     f"{offload_gb:.1f}GB in RAM (via ncmoe). "
+                     "Speed limited by RAM bandwidth.[/]")
+        lines.append("     → Upgrade: larger VRAM GPU or smaller model quant (Q4_K_M).")
+
+    # KV cache RAM info
+    mb_per_tok = kv_mb_per_token(model)
+    kv_gb = ctx * mb_per_tok / 1024
+    total_needed_gb = model.file_size_gb + kv_gb + 4.0  # model + KV + OS overhead
+    ram_free_at_ctx = hw.ram_total_gb - total_needed_gb
+    if ram_free_at_ctx < 2:
+        lines.append(f"  [red]✗ KV cache at {ctx:,} tokens ≈ {kv_gb:.1f}GB — "
+                     f"only {ram_free_at_ctx:.1f}GB RAM left for OS! Reduce context.[/]")
+        safe_ctx = int((hw.ram_total_gb - model.file_size_gb - 4 - 3) * 0.9 * 1024 / mb_per_tok) if mb_per_tok > 0 else ctx
+        safe_ctx = max(4096, (safe_ctx // 4096) * 4096)
+        lines.append(f"     → Safer: -c {safe_ctx:,}")
+    elif ram_free_at_ctx < 6:
+        lines.append(f"  [yellow]⚠  KV cache at {ctx:,} tokens ≈ {kv_gb:.1f}GB. "
+                     f"{ram_free_at_ctx:.1f}GB RAM left — tight, close other apps.[/]")
+    else:
+        lines.append(f"  [dim]ℹ  Context {ctx:,} → KV cache ≈ {kv_gb:.1f}GB RAM "
+                     f"({ram_free_at_ctx:.0f}GB remaining for OS)[/]")
+
+    # Quantization advice
+    q = model.quantization.upper()
+    if "Q2" in q or "IQ1" in q or "IQ2" in q:
+        lines.append("  [yellow]⚠  Very low quantization (Q2/IQ2) — quality is reduced. "
+                     "Q4_K_M offers better balance.[/]")
+
+    # MoE ncmoe info
+    if model.is_moe and "ncmoe" in params:
+        ncmoe = params["ncmoe"]
+        n_total = model.n_experts_total or 256
+        in_gpu = n_total - ncmoe
+        lines.append(f"  [dim]ℹ  MoE: {in_gpu} experts in VRAM, {ncmoe} in RAM "
+                     f"(-ncmoe {ncmoe})[/]")
+
+    # Thermal
+    if max_cpu > 90:
+        lines.append(f"  [red]🌡 CPU throttled! Peak {max_cpu:.0f}°C — "
+                     "results are pessimistic. Improve cooling.[/]")
+    elif max_cpu > 80:
+        lines.append(f"  [yellow]🌡 CPU warm: peak {max_cpu:.0f}°C — "
+                     "check thermal paste / fans.[/]")
+    elif max_cpu > 0:
+        lines.append(f"  [dim]🌡 CPU peak: {max_cpu:.0f}°C (GPU: {max_gpu:.0f}°C)[/]")
+
+    if max_gpu > 85:
+        lines.append(f"  [red]🌡 GPU throttled! Peak {max_gpu:.0f}°C.[/]")
+
+    # CUDA / driver
+    if hw.backend.value == "cuda":
+        lines.append(f"  [dim]ℹ  CUDA backend · driver {hw.driver_version or 'unknown'} "
+                     f"· llama.cpp {env_cfg.build}[/]")
+        lines.append("     → Run [bold]ggtune update --check[/] to see relevant llama.cpp changes.")
+    else:
+        lines.append(f"  [yellow]⚠  Backend: {hw.backend.value} (not CUDA). "
+                     "CUDA gives 2–5× better TG speed.[/]")
+
+    # Unsloth model
+    if "unsloth" in model.path.lower():
+        lines.append("  [dim]✓ Unsloth model — GGUFs are well-optimized.[/]")
+
+    return lines
+
+
 def print_report(
     model: ModelProfile,
     hw: HardwareProfile,
@@ -148,6 +251,7 @@ def print_report(
         lines.insert(-1, "[yellow]⚠  KV cache in RAM. Speed decreases as context grows.[/]")
 
     console.print(Panel("\n".join(lines), title="GGTune Results", border_style="cyan"))
+    console.print("\n".join(_build_diagnostics(hw, model, result, env_cfg)))
 
     rc = _rc_file(hw.shell)
     if rc is not None:

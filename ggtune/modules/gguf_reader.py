@@ -100,6 +100,7 @@ def read(model_path: str) -> ModelProfile:
     context_length_max = get_int(f"{prefix}.context_length") or 4096
     n_experts_total = get_int(f"{prefix}.expert_count")
     n_experts_used = get_int(f"{prefix}.expert_used_count")
+    n_kv_heads = get_int(f"{prefix}.attention.head_count_kv")
 
     is_moe = _is_moe(arch, n_experts_total)
     quantization = _extract_quantization(reader)
@@ -117,4 +118,5 @@ def read(model_path: str) -> ModelProfile:
         quantization=quantization,
         n_experts_total=n_experts_total,
         n_experts_used=n_experts_used,
+        n_kv_heads=n_kv_heads,
     )

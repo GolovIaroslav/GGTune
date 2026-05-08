@@ -105,14 +105,6 @@ def run(
         )
         raise SystemExit(1)
 
-    # Cached profile?
-    if not force:
-        cached = profile_storage.load(model_path, hw)
-        if cached:
-            info("Found cached profile — skipping benchmark.")
-            advisor.print_cached(cached)
-            return
-
     # llama.cpp environment
     info("Checking llama.cpp environment...")
     try:
@@ -169,7 +161,8 @@ def run(
         thermal.stop()
 
     total_min = (time.time() - t0) / 60
-    thermal.report()
+    result["thermal_max_cpu"] = thermal.max_cpu
+    result["thermal_max_gpu"] = thermal.max_gpu
 
     # Determine bottleneck
     bottleneck = advisor.determine_bottleneck(hw, model, result["best_params"], result["tg_tokens_per_sec"])

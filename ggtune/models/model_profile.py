@@ -15,6 +15,7 @@ class ModelProfile:
     quantization: str
     n_experts_total: Optional[int] = None
     n_experts_used: Optional[int] = None
+    n_kv_heads: Optional[int] = None
 
     def __str__(self) -> str:
         moe = f" MoE {self.n_experts_total}e" if self.is_moe else ""

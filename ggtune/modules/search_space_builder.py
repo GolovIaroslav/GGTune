@@ -1,5 +1,4 @@
 """Module 5: Search Space Builder."""
-import math
 from typing import List
 
 from ggtune.config import CONTEXT_CANDIDATES
@@ -8,10 +7,24 @@ from ggtune.models.model_profile import ModelProfile
 from ggtune.models.search_space import SearchSpace
 
 
-def _estimate_kv_mb_per_token(model: ModelProfile) -> float:
-    """Very rough KV estimate: 2 * layers * heads * head_dim * 2 bytes (f16)."""
+def kv_mb_per_token(model: ModelProfile) -> float:
+    """Estimate KV cache RAM per token in MB (f16, using actual KV heads if known)."""
+    kv_heads = model.n_kv_heads or max(1, model.n_heads // 8)
     head_dim = 128
-    return 2 * model.n_layers * model.n_heads * head_dim * 2 / (1024 * 1024)
+    # 2 (K+V) × layers × kv_heads × head_dim × 2 bytes (f16)
+    return 2 * model.n_layers * kv_heads * head_dim * 2 / (1024 * 1024)
+
+
+def max_practical_ctx(hw: HardwareProfile, model: ModelProfile) -> int:
+    """Max context that fits within ~70% of available RAM for KV cache."""
+    mb_per_tok = kv_mb_per_token(model)
+    if mb_per_tok <= 0:
+        return max(CONTEXT_CANDIDATES)
+    # RAM budget: total minus model (conservatively all in RAM) minus 5GB for OS/apps
+    ram_for_kv_mb = (hw.ram_total_gb - model.file_size_gb - 5.0) * 1024 * 0.85
+    if ram_for_kv_mb <= 0:
+        return CONTEXT_CANDIDATES[0]
+    return int(ram_for_kv_mb / mb_per_tok)
 
 
 def _thread_candidates(hw: HardwareProfile) -> List[int]:
@@ -26,7 +39,6 @@ def _thread_candidates(hw: HardwareProfile) -> List[int]:
 
 
 def build(hw: HardwareProfile, model: ModelProfile) -> SearchSpace:
-    # Use total RAM for the check — available RAM fluctuates with running processes
     if model.file_size_gb > hw.ram_total_gb * 0.85:
         raise RuntimeError(
             f"Model {model.file_size_gb:.1f}GB won't fit in RAM "
@@ -37,20 +49,22 @@ def build(hw: HardwareProfile, model: ModelProfile) -> SearchSpace:
     flash_attn = hw.backend in (Backend.CUDA, Backend.ROCM, Backend.METAL)
     kv_quants = ["f16", "q8_0", "q4_0"]
 
-    ctx_candidates = [c for c in CONTEXT_CANDIDATES if c <= model.context_length_max]
+    ctx_cap = max_practical_ctx(hw, model)
+    ctx_candidates = [
+        c for c in CONTEXT_CANDIDATES
+        if c <= model.context_length_max and c <= ctx_cap
+    ]
     if not ctx_candidates:
-        ctx_candidates = [min(CONTEXT_CANDIDATES)]
+        ctx_candidates = [min(c for c in CONTEXT_CANDIDATES if c <= model.context_length_max)
+                          if any(c <= model.context_length_max for c in CONTEXT_CANDIDATES)
+                          else CONTEXT_CANDIDATES[0]]
 
     if model.is_moe and model.n_experts_total and model.n_experts_used:
-        # ncmoe = number of experts offloaded to CPU RAM.
-        # ncmoe=N means N experts in CPU, (total-N) experts in GPU VRAM.
-        # To fit in limited VRAM: search from high ncmoe (few in GPU) downward.
-        #
-        # Safe minimum: total - used (keeps exactly used# experts in GPU)
-        # Safe maximum: total - 1 (1 expert in GPU, all others in CPU)
+        # ncmoe=N means N experts in CPU RAM, (total-N) in GPU VRAM.
+        # High ncmoe = fewer experts in GPU = less VRAM needed.
         n_total = model.n_experts_total
         n_used = model.n_experts_used
-        ncmoe_min = max(n_total - n_used, n_used)  # at least n_used in GPU
+        ncmoe_min = max(n_total - n_used, n_used)
         ncmoe_max = n_total - 1
         step = max(1, n_used)
         ncmoe_range = range(ncmoe_min, ncmoe_max + 1, step)

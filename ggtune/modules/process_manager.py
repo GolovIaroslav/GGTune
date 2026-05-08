@@ -11,10 +11,10 @@ from rich import box
 console = Console()
 
 HUNGRY_PROCESSES = {
-    "llama-server": "llama-server instance",
+    "llama-server": "llama-server",
     "llama-cli":    "llama-cli",
     "ollama":       "Ollama (holds GPU)",
-    "chrome":       "Google Chrome",
+    "google-chrome": "Google Chrome",
     "chromium":     "Chromium",
     "firefox":      "Firefox",
     "code":         "VS Code",
@@ -23,18 +23,33 @@ HUNGRY_PROCESSES = {
     "comfyui":      "ComfyUI",
 }
 
-WARN_UNSAVED = {"chrome", "chromium", "firefox", "code"}
+# Exact-name processes to skip (crash handlers, sandboxes, etc.)
+SKIP_NAMES = {
+    "chrome_crashpad_handler", "chromium-sandbox", "nacl_helper",
+    "zygote_host_exec", "chrome-sandbox",
+}
+
+# Exe path substrings → HUNGRY_PROCESSES key
+# Catches multiprocess apps (Firefox Web Content, Chromium renderers, etc.)
+EXE_KEY_MAP = {
+    "firefox": "firefox",
+    "chromium": "chromium",
+    "google-chrome": "google-chrome",
+    "chrome": "google-chrome",
+}
+
+WARN_UNSAVED = {"google-chrome", "chromium", "firefox", "code"}
 
 
 def _gpu_mem_by_pid() -> Dict[int, int]:
-    """Returns {pid: vram_mb} for all processes using GPU via nvidia-smi."""
+    """Returns {pid: vram_mb} for all GPU processes via nvidia-smi."""
     try:
         r = subprocess.run(
             ["nvidia-smi", "--query-compute-apps=pid,used_memory",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5,
         )
-        result = {}
+        result: Dict[int, int] = {}
         for line in r.stdout.splitlines():
             parts = line.strip().split(",")
             if len(parts) == 2:
@@ -62,22 +77,38 @@ def _find_hungry() -> List[_Group]:
             pid = proc.info["pid"]
             raw_name = proc.info["name"] or ""
             name_lower = raw_name.lower()
+
+            if name_lower in SKIP_NAMES:
+                continue
+
             ram_mb = (proc.info["memory_info"].rss / (1024 * 1024)
                       if proc.info["memory_info"] else 0)
             has_gpu = pid in gpu_pids
 
-            # Find matching HUNGRY key
+            # 1) Exact / prefix name match against HUNGRY_PROCESSES keys
             group_key = None
             for key in HUNGRY_PROCESSES:
-                if key in name_lower:
+                if name_lower == key or name_lower.startswith(key):
                     group_key = key
                     break
 
-            if not has_gpu and group_key is None:
-                continue
+            # 2) Exe-path match (catches Firefox Web Content, Chromium renderers…)
+            if group_key is None:
+                try:
+                    exe = proc.exe().lower()
+                    for pattern, key in EXE_KEY_MAP.items():
+                        if pattern in exe:
+                            group_key = key
+                            break
+                except Exception:
+                    pass
+
+            # 3) Unknown GPU process — still show it
+            if group_key is None and has_gpu:
+                group_key = f"_gpu_{name_lower}"
 
             if group_key is None:
-                group_key = f"_gpu_{name_lower}"
+                continue
 
             if group_key not in groups:
                 groups[group_key] = {
@@ -102,8 +133,8 @@ def _find_hungry() -> List[_Group]:
         result.append((key, g["name"], g["desc"], g["pids"],
                        g["ram_mb"], g["vram_mb"], g["has_gpu"]))
 
-    # Sort: VRAM-using first (by vram_mb desc), then RAM desc
-    result.sort(key=lambda g: (-g[5], not g[6], -g[4]))
+    # Sort: VRAM desc first, then RAM desc
+    result.sort(key=lambda g: (-g[5], -g[4]))
     return result
 
 
