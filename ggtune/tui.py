@@ -1,6 +1,7 @@
 """Interactive TUI — full guided flow for GGTune."""
 import os
 import platform
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional, List, Tuple
@@ -876,18 +877,20 @@ def _screen_llama_update() -> None:
         except RuntimeError:
             pass
 
-        # Show installations table
+        # Show installations table (full terminal width)
+        tbl_w = max(80, console.width - 2)
+        path_max = tbl_w - 28  # 3 + 7 + 8 + borders/padding
         if installs:
-            table = Table(box=box.ROUNDED, header_style="bold", width=WIDTH)
+            table = Table(box=box.ROUNDED, header_style="bold", width=tbl_w)
             table.add_column("#", style="dim", justify="right", width=3)
             table.add_column("Build", width=7)
-            table.add_column("Backend", width=7)
+            table.add_column("Backend", width=8)
             table.add_column("Path")
             for i, inst in enumerate(installs, 1):
                 is_active = active_dir and (
                     str(Path(inst.bin_dir).resolve()) == active_dir
                 )
-                path_str = _truncate_path(inst.bin_dir, 42)
+                path_str = _truncate_path(inst.bin_dir, path_max)
                 tag = "  [green]← active[/]" if is_active else ""
                 table.add_row(str(i), inst.build, inst.backend.value, path_str + tag)
             console.print(table)
@@ -921,19 +924,19 @@ def _screen_llama_update() -> None:
         # Rollback info
         prev = env_manager.get_previous()
 
-        # Compact hint line (models-screen style)
-        hints = []
+        # Two-line hint (to fit everything)
+        row1 = "[bold]#[/bold] use"
         if installs:
-            hints.append("[bold]number[/bold] — activate")
-        hints.append("[bold]a[/bold] — add path")
+            row1 += "  [bold]x[/bold] delete"
+        row1 += "  [bold]a[/bold] add path  [bold]s[/bold] deep scan  [bold]b[/bold] back"
+        row2 = ""
         if latest:
-            hints.append(f"[bold]u[/bold] — update to {latest}")
-        hints.append("[bold]i[/bold] — install version...")
+            row2 += f"[bold]u[/bold] update→{latest}  "
+        row2 += "[bold]i[/bold] install version"
         if prev:
-            hints.append(f"[bold]r[/bold] — rollback to {prev[1]}")
-        hints.append("[bold]s[/bold] — deep scan")
-        hints.append("[bold]b[/bold] — back")
-        console.print("\n  [dim]" + "  ".join(hints) + "[/dim]")
+            row2 += f"  [bold]r[/bold] rollback→{prev[1]}"
+        console.print(f"\n  [dim]{row1}[/dim]")
+        console.print(f"  [dim]{row2}[/dim]")
 
         choice = _ask("").strip().lower()
 
@@ -957,6 +960,35 @@ def _screen_llama_update() -> None:
                 )
                 env_manager.set_active(inst)
                 console.print(f"  [green]✓ Activated: {build_v} at {p}[/]")
+            _ask("\nPress Enter to continue")
+
+        elif choice == "x":
+            if not installs:
+                continue
+            n = _ask("Delete installation #: ")
+            try:
+                idx = int(n) - 1
+                inst = installs[idx]
+            except (ValueError, IndexError):
+                console.print("  [red]Invalid number.[/]")
+                _ask("\nPress Enter to continue")
+                continue
+            is_active = active_dir and str(Path(inst.bin_dir).resolve()) == active_dir
+            if is_active:
+                console.print("  [yellow]This is the active installation — activate another first.[/]")
+                _ask("\nPress Enter to continue")
+                continue
+            console.print(f"  [dim]{inst.bin_dir}[/]")
+            confirm = _ask(f"  Delete {inst.build} from disk? (y/n): ")
+            if confirm.lower() == "y":
+                try:
+                    shutil.rmtree(inst.bin_dir)
+                    console.print(f"  [green]✓ Deleted {inst.build}.[/]")
+                    _refresh()
+                except Exception as e:
+                    console.print(f"  [red]Delete failed: {e}[/]")
+            else:
+                console.print("  [dim]Cancelled.[/]")
             _ask("\nPress Enter to continue")
 
         elif choice == "u":
