@@ -368,7 +368,7 @@ def context_search(
             mid = (lo + hi + 1) // 2
             ctx = candidates[mid]
             r = run_bench(env_cfg, model, best_params, ctx=ctx)
-            progress.advance(task, description=f"Context search  ctx={ctx}")
+            progress.update(task, advance=1, description=f"Context search  ctx={ctx}")
             if r.crashed or r.tg_tokens_per_sec < min_tg:
                 hi = mid - 1
             else:
