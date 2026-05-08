@@ -1,0 +1,4 @@
+| model | size | params | backend | ngl | n_batch | n_ubatch | type_k | type_v | n_threads | type | test | t/s mean | t/s std |
+| ----- | ---- | ------ | ------- | --- | ------- | -------- | ------ | ------ | --------- | ---- | ---- | ---- | ---- |
+| llama 8B mostly Q8_0 | 7.7 GiB | 8.03 B | CUDA | 999 | 2048 | 512 | f16 | f16 | 8 | f16 | pp512 | 987.65 | 10.1 |
+| llama 8B mostly Q8_0 | 7.7 GiB | 8.03 B | CUDA | 999 | 2048 | 512 | f16 | f16 | 8 | f16 | tg128 | 38.14 | 0.52 |

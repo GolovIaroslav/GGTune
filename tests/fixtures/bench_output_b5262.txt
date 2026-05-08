@@ -1,0 +1,4 @@
+| model | size | params | backend | ngl | n_batch | n_ubatch | type_k | type_v | n_threads | type | test | t/s mean | t/s std |
+| ----- | ---- | ------ | ------- | --- | ------- | -------- | ------ | ------ | --------- | ---- | ---- | ---- | ---- |
+ggml-org_models,7.7 GiB,8.03 B,CUDA,999,2048,512,q8_0,q8_0,8,f16,pp512,1234.56,12.3
+ggml-org_models,7.7 GiB,8.03 B,CUDA,999,2048,512,q8_0,q8_0,8,f16,tg128,45.72,0.83
