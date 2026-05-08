@@ -183,112 +183,127 @@ def _maybe_run_setup() -> None:
         _screen_setup(hw)
 
 
-# ── Screen 9: Model manager ───────────────────────────────────────────────
+# ── Screen 1: Models (unified: view / scan / manage / launch) ─────────────
 
-def _screen_model_manager() -> None:
+def _screen_models() -> Optional[str]:
     from ggtune.modules import model_tracker
+
+    session_found: dict = {}  # path -> size_bytes, from disk scan this session
+
     while True:
         _clear()
-        _banner("Model Manager")
+        _banner("Models")
 
-        models = model_tracker.list_all()
-        scan_dirs = model_tracker.load_scan_dirs()
+        tracked = model_tracker.list_all()
+        tracked_paths = {m.path for m in tracked}
 
-        if models:
+        rows: list = []
+        for m in tracked:
+            vision = " [cyan]+V[/]" if m.mmproj_path and Path(m.mmproj_path).exists() else ""
+            tag = "HF" if m.source_type == "downloaded" else "local"
+            rows.append({"path": m.path, "filename": m.filename,
+                         "size_gb": m.size_gb, "tag": tag, "vision": vision})
+        for path, size in session_found.items():
+            if path not in tracked_paths:
+                rows.append({"path": path, "filename": Path(path).name,
+                             "size_gb": size / 1e9, "tag": "found", "vision": ""})
+
+        if rows:
             table = Table(box=box.ROUNDED, header_style="bold", width=WIDTH)
-            table.add_column("#", style="dim", justify="right")
+            table.add_column("#", style="dim", justify="right", width=3)
             table.add_column("File")
-            table.add_column("Size", justify="right")
-            table.add_column("Date", style="dim")
-            table.add_column("Type", style="dim")
-            for i, m in enumerate(models, 1):
-                tag = "[dim]HF[/dim]" if m.source_type == "downloaded" else "[dim]local[/dim]"
-                vision = " [cyan]+V[/]" if m.mmproj_path and Path(m.mmproj_path).exists() else ""
-                table.add_row(
-                    str(i), m.filename + vision,
-                    f"{m.size_gb:.1f} GB",
-                    m.downloaded_at, tag,
-                )
+            table.add_column("Size", justify="right", width=8)
+            table.add_column("", width=6, style="dim")
+            for i, r in enumerate(rows, 1):
+                table.add_row(str(i), f"[bold]{r['filename']}[/bold]" + r["vision"],
+                              f"{r['size_gb']:.1f} GB", r["tag"])
             console.print(table)
+
+            scan_dirs = model_tracker.load_scan_dirs()
+            if scan_dirs:
+                console.print(f"  [dim]Watch folders: {', '.join(scan_dirs)}[/]")
         else:
-            console.print("  [dim]No models tracked yet.[/]")
+            console.print(
+                "  [dim]No models yet. Press [bold]s[/] to scan disk "
+                "or [bold]3[/] in the main menu to download one.[/]"
+            )
 
-        if scan_dirs:
-            console.print(f"\n  [dim]Scan folders: {', '.join(scan_dirs)}[/]")
+        console.print(
+            "\n  [dim][bold]number[/bold] — benchmark  "
+            "[bold]s[/bold] — quick scan  [bold]f[/bold] — thorough scan  "
+            "[bold]d[/bold] — delete  [bold]a[/bold] — add watch folder  "
+            "[bold]r[/bold] — rescan folders  [bold]b[/bold] — back[/dim]"
+        )
+        choice = _ask("").strip().lower()
 
-        console.print(Panel(
-            "  [bold cyan][number][/]  Delete model\n"
-            "  [bold cyan][a][/]       Add folder to scan\n"
-            "  [bold cyan][r][/]       Rescan all folders\n"
-            "  [bold cyan][d][/]       Remove a scan folder\n"
-            "  [bold cyan][b][/]       Back",
-            border_style="dim", padding=(0, 4), width=WIDTH,
-        ))
+        if choice in ("b", ""):
+            return None
 
-        choice = _ask("Choice: ").strip()
+        elif choice == "s":
+            console.print("[dim]Scanning via locate...[/]")
+            items = _scan_gguf_files("locate")
+            new = sum(1 for p, _ in items if p not in session_found and p not in tracked_paths)
+            session_found.update({p: sz for p, sz in items})
+            console.print(f"[dim]Found {len(items)} model(s), {new} new.[/]")
 
-        if choice.lower() in ("b", ""):
-            return
+        elif choice == "f":
+            console.print("[dim]Running find — up to 30 seconds...[/]")
+            items = _scan_gguf_files("find")
+            new = sum(1 for p, _ in items if p not in session_found and p not in tracked_paths)
+            session_found.update({p: sz for p, sz in items})
+            console.print(f"[dim]Found {len(items)} model(s), {new} new.[/]")
 
-        elif choice.lower() == "a":
-            folder = _ask("Folder path: ").strip()
+        elif choice == "d":
+            if not rows:
+                continue
+            n = _ask("Delete model #: ")
+            try:
+                target = rows[int(n) - 1]
+            except (ValueError, IndexError):
+                console.print("[red]Invalid.[/]")
+                continue
+            tm = next((m for m in tracked if m.path == target["path"]), None)
+            if tm:
+                if tm.source_type == "local":
+                    action = _ask("  [r] remove from list  [x] delete file: ").lower()
+                    if action == "r":
+                        model_tracker.remove(tm.path, delete_file=False)
+                        console.print("[green]✓ Removed from list.[/]")
+                    elif action == "x":
+                        if _ask(f"  Delete {tm.filename}? [y/N]: ").lower() == "y":
+                            model_tracker.remove(tm.path, delete_file=True)
+                            console.print("[green]✓ Deleted.[/]")
+                else:
+                    if _ask(f"  Delete {target['filename']}? [y/N]: ").lower() == "y":
+                        model_tracker.remove(tm.path)
+                        console.print("[green]✓ Deleted.[/]")
+            else:
+                session_found.pop(target["path"], None)
+                console.print("[green]✓ Removed from list.[/]")
+
+        elif choice == "a":
+            folder = _ask("Folder path: ")
             if folder:
                 p = Path(folder).expanduser()
                 if p.is_dir():
                     model_tracker.add_scan_dir(str(p))
-                    console.print(f"[green]✓ Added {p}[/]")
+                    console.print(f"[green]✓ Added. Press [bold]r[/] to scan it.[/]")
                 else:
                     console.print("[red]Directory not found.[/]")
-            _ask("Press Enter to continue")
 
-        elif choice.lower() == "r":
-            console.print("[dim]Scanning...[/]")
+        elif choice == "r":
+            console.print("[dim]Rescanning watch folders...[/]")
             n = model_tracker.rescan_dirs()
             console.print(f"[green]✓ Found {n} new model(s).[/]")
-            _ask("Press Enter to continue")
-
-        elif choice.lower() == "d":
-            if not scan_dirs:
-                console.print("[dim]No scan folders configured.[/]")
-                _ask("Press Enter to continue")
-                continue
-            for i, d in enumerate(scan_dirs, 1):
-                console.print(f"  [dim]{i}[/]  {d}")
-            idx_s = _ask("Number to remove: ")
-            try:
-                model_tracker.remove_scan_dir(scan_dirs[int(idx_s) - 1])
-                console.print("[green]✓ Removed.[/]")
-            except (ValueError, IndexError):
-                console.print("[red]Invalid.[/]")
-            _ask("Press Enter to continue")
 
         else:
             try:
                 idx = int(choice) - 1
-                target = models[idx]
-            except (ValueError, IndexError):
-                console.print("[red]Invalid choice.[/]")
-                _ask("Press Enter to continue")
-                continue
-
-            if target.source_type == "local":
-                action = _ask(f"[r] remove from list only  [d] delete file  [b] cancel: ").lower()
-                if action == "r":
-                    model_tracker.remove(target.path, delete_file=False)
-                    console.print("[green]✓ Removed from list.[/]")
-                    _ask("Press Enter to continue")
-                elif action == "d":
-                    confirm = _ask(f"Delete file {target.filename}? [y/N]: ")
-                    if confirm.lower() == "y":
-                        model_tracker.remove(target.path, delete_file=True)
-                        console.print(f"[green]✓ Deleted {target.filename}[/]")
-                    _ask("Press Enter to continue")
-            else:
-                confirm = _ask(f"Delete {target.filename}? [y/N]: ")
-                if confirm.lower() == "y":
-                    model_tracker.remove(target.path)
-                    console.print(f"[green]✓ Deleted {target.filename}[/]")
-                    _ask("Press Enter to continue")
+                if 0 <= idx < len(rows):
+                    return rows[idx]["path"]
+                console.print(f"[red]Enter 1–{len(rows)}.[/]")
+            except ValueError:
+                console.print("[red]Unknown command.[/]")
 
 
 # ── Main menu ──────────────────────────────────────────────────────────────
@@ -311,7 +326,7 @@ def main_menu() -> None:
         console.print(_status)
 
         console.print(Panel(
-            "  [bold cyan][1][/]  Scan for models on this machine\n"
+            "  [bold cyan][1][/]  Models\n"
             "  [bold cyan][2][/]  Enter model path manually\n"
             "  [bold cyan][3][/]  Browse HuggingFace (find & download)\n"
             "  [bold cyan][4][/]  Saved benchmark profiles\n"
@@ -319,7 +334,6 @@ def main_menu() -> None:
             "  [bold cyan][6][/]  llama.cpp — version / update\n"
             "  [bold cyan][7][/]  Compatibility test\n"
             "  [bold cyan][8][/]  Clear all profiles\n"
-            "  [bold cyan][9][/]  Model manager\n"
             "  [bold cyan][q][/]  Exit",
             title="[bold]What do you want to do?[/]",
             border_style="cyan",
@@ -330,7 +344,7 @@ def main_menu() -> None:
         choice = _ask("Choice: ")
 
         if choice == "1":
-            path = _screen_scan()
+            path = _screen_models()
             if path:
                 _screen_model_and_run(path)
         elif choice == "2":
@@ -351,8 +365,6 @@ def main_menu() -> None:
             _screen_compat()
         elif choice == "8":
             _screen_clear_profiles()
-        elif choice == "9":
-            _screen_model_manager()
         elif choice.lower() in ("q", "quit", "exit", ""):
             _clear()
             console.print("[dim]Bye![/]")
@@ -462,66 +474,6 @@ def _truncate_path(path: str, max_len: int = 55) -> str:
     if len(path) <= max_len:
         return path
     return "…" + path[-(max_len - 1):]
-
-
-def _screen_scan() -> Optional[str]:
-    _clear()
-    _banner("Scan for Models")
-
-    # On Linux/macOS let user pick locate vs find
-    search_method = "locate"
-    if platform.system() in ("Linux", "Darwin"):
-        console.print(Panel(
-            "  [bold cyan][1][/]  [bold]locate[/]  [dim]— fast (uses file index, may miss recently downloaded files)[/]\n"
-            "  [bold cyan][2][/]  [bold]find[/]    [dim]— thorough (scans your home folder in real time, slower ~30s)[/]",
-            title="[bold]Search method[/]",
-            border_style="dim",
-            padding=(1, 4),
-            width=WIDTH,
-        ))
-        m = _ask("Choice [1/2]: ")
-        if m == "2":
-            search_method = "find"
-            console.print("[dim]Running find (this may take up to 30 seconds)...[/]\n")
-        else:
-            console.print("[dim]Searching via locate index...[/]\n")
-    else:
-        console.print("[dim]Scanning standard locations...[/]\n")
-
-    items = _scan_gguf_files(search_method)
-
-    if not items:
-        console.print("[yellow]No models found.[/]")
-        if search_method == "locate":
-            console.print("[dim]Tip: if you just downloaded a model, try scan again with [bold]find[/] (option 2).[/]")
-        console.print("[dim]Or use option 2 (manual path) or 3 (HuggingFace browse).[/]")
-        _ask("\nPress Enter to go back")
-        return None
-
-    _clear()
-    _banner("Scan Results")
-
-    table = Table(box=box.ROUNDED, show_header=True, header_style="bold")
-    table.add_column("#", style="dim", width=4, justify="right")
-    table.add_column("Size", justify="right", width=9)
-    table.add_column("Path")
-
-    for i, (fpath, size) in enumerate(items, 1):
-        table.add_row(str(i), f"{size / 1e9:.1f} GB", _format_path(fpath))
-
-    console.print(table)
-    console.print(f"\n  Found [bold]{len(items)}[/] model(s).")
-    console.print("  Enter a [bold]number[/] to select, or [bold]b[/] to go back.\n")
-
-    while True:
-        choice = _ask("Select model #: ")
-        if choice.lower() in ("b", ""):
-            return None
-        if choice.isdigit():
-            idx = int(choice) - 1
-            if 0 <= idx < len(items):
-                return items[idx][0]
-        console.print(f"  [red]Invalid choice.[/] Enter 1–{len(items)} or b.")
 
 
 # ── Screen 2: Manual path ─────────────────────────────────────────────────
