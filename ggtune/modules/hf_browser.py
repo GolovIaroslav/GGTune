@@ -126,6 +126,7 @@ def recommend(hw: HardwareProfile, author: str = "unsloth", vram_gb: Optional[fl
     for model in models:
         model_id = model.get("modelId") or model.get("id", "")
         tags = model.get("tags", [])
+        dl_count = model.get("downloads", 0) or 0
         is_moe, active_fraction = _parse_moe_info(model_id, tags)
 
         files = _fetch_files(model_id)
@@ -154,7 +155,6 @@ def recommend(hw: HardwareProfile, author: str = "unsloth", vram_gb: Optional[fl
                 min_vram = size_gb
                 fits_ncmoe = False
 
-            # skip models that won't fit even with ncmoe
             if not fits_vram and not fits_ncmoe:
                 continue
 
@@ -170,10 +170,18 @@ def recommend(hw: HardwareProfile, author: str = "unsloth", vram_gb: Optional[fl
                 score=_score(quant, size_gb, vram, fits_vram, fits_ncmoe),
                 hf_url=f"https://huggingface.co/{model_id}/blob/main/{fname}",
                 download_cmd=f"huggingface-cli download {model_id} {fname}",
+                downloads=dl_count,
             ))
 
-    full_fit = sorted([r for r in recommendations if r.fits_vram], key=lambda x: x.score, reverse=True)[:5]
-    ncmoe_fit = sorted([r for r in recommendations if r.fits_vram_ncmoe], key=lambda x: x.score, reverse=True)[:5]
+    # Sort primary by downloads (popularity), secondary by quality score
+    full_fit = sorted(
+        [r for r in recommendations if r.fits_vram],
+        key=lambda x: (x.downloads, x.score), reverse=True,
+    )[:10]
+    ncmoe_fit = sorted(
+        [r for r in recommendations if r.fits_vram_ncmoe],
+        key=lambda x: (x.downloads, x.score), reverse=True,
+    )[:10]
     return full_fit + ncmoe_fit
 
 
@@ -183,14 +191,22 @@ def print_table(recs: List[ModelRecommendation], hw: HardwareProfile) -> None:
     full = [r for r in recs if r.fits_vram]
     ncmoe = [r for r in recs if r.fits_vram_ncmoe]
 
+    def _fmt_dl(n: int) -> str:
+        if n >= 1_000_000:
+            return f"{n/1_000_000:.1f}M"
+        if n >= 1_000:
+            return f"{n//1_000}K"
+        return str(n)
+
     def _make_table() -> Table:
         t = Table(title=title, box=box.ROUNDED, show_header=True)
         t.add_column("#", style="dim", justify="right")
-        t.add_column("Model", min_width=28)
-        t.add_column("File", min_width=22)
+        t.add_column("Model", min_width=24)
+        t.add_column("File", min_width=20)
         t.add_column("Size", justify="right")
         t.add_column("VRAM", justify="center")
         t.add_column("Quant")
+        t.add_column("↓ DLs", justify="right", style="dim")
         return t
 
     table = _make_table()
@@ -199,22 +215,28 @@ def print_table(recs: List[ModelRecommendation], hw: HardwareProfile) -> None:
     if full:
         table.add_section()
         for r in full:
-            table.add_row(str(idx), r.model_id, r.filename, f"{r.size_gb:.1f} GB",
-                          "[green]✓ full[/]", r.quantization)
+            table.add_row(
+                str(idx), r.model_id, r.filename, f"{r.size_gb:.1f} GB",
+                "[green]✓ full[/]", r.quantization, _fmt_dl(r.downloads),
+            )
             idx += 1
 
     if ncmoe:
         table.add_section()
         for r in ncmoe:
-            table.add_row(str(idx), f"{r.model_id} [dim](MoE)[/]", r.filename,
-                          f"{r.size_gb:.1f} GB",
-                          f"[yellow]ncmoe ~{r.min_vram_gb:.1f}GB[/]", r.quantization)
+            table.add_row(
+                str(idx), f"{r.model_id} [dim](MoE)[/]", r.filename,
+                f"{r.size_gb:.1f} GB",
+                f"[yellow]ncmoe ~{r.min_vram_gb:.1f}GB[/]",
+                r.quantization, _fmt_dl(r.downloads),
+            )
             idx += 1
 
     console.print(table)
     console.print(
         "[dim]✓ full = fits in VRAM entirely  "
-        "| [yellow]ncmoe[/dim] [dim]= 35B+ MoE model, only active experts in VRAM (~8x speedup vs CPU)[/]\n"
+        "| [yellow]ncmoe[/dim] [dim]= MoE model, only active experts in VRAM  "
+        "| sorted by popularity (↓ DLs)[/]\n"
     )
 
 

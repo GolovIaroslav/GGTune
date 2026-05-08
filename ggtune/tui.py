@@ -49,11 +49,14 @@ def main_menu() -> None:
         _clear()
         _banner()
         console.print(Panel(
-            "  [bold cyan][1][/]  Scan for .gguf models on this machine\n"
+            "  [bold cyan][1][/]  Scan for models on this machine\n"
             "  [bold cyan][2][/]  Enter model path manually\n"
-            "  [bold cyan][3][/]  Browse HuggingFace (find & download models)\n"
-            "  [bold cyan][4][/]  Show saved benchmark profiles\n"
+            "  [bold cyan][3][/]  Browse HuggingFace (find & download)\n"
+            "  [bold cyan][4][/]  Saved benchmark profiles\n"
             "  [bold cyan][5][/]  Hardware info\n"
+            "  [bold cyan][6][/]  llama.cpp — version / update\n"
+            "  [bold cyan][7][/]  Compatibility test\n"
+            "  [bold cyan][8][/]  Clear all profiles\n"
             "  [bold cyan][q][/]  Exit",
             title="[bold]What do you want to do?[/]",
             border_style="cyan",
@@ -79,6 +82,12 @@ def main_menu() -> None:
             _screen_profiles()
         elif choice == "5":
             _screen_hardware()
+        elif choice == "6":
+            _screen_llama_update()
+        elif choice == "7":
+            _screen_compat()
+        elif choice == "8":
+            _screen_clear_profiles()
         elif choice.lower() in ("q", "quit", "exit", ""):
             _clear()
             console.print("[dim]Bye![/]")
@@ -439,3 +448,113 @@ def _screen_model_and_run(model_path: str) -> None:
     _run(model_path, quick=quick)
 
     _ask("\nPress Enter to return to main menu")
+
+
+# ── Screen 6: llama.cpp version / update ─────────────────────────────────────
+
+def _screen_llama_update() -> None:
+    _clear()
+    _banner("llama.cpp — Version & Update")
+
+    from ggtune.modules import hardware_scanner, env_manager
+    from ggtune.modules.compat_guard import check_for_changes
+
+    hw = hardware_scanner.scan()
+
+    try:
+        env = env_manager.detect(hw)
+        console.print(f"  [bold]Current build:[/]  {env.build}")
+        console.print(f"  [bold]Backend:[/]        {env.backend.value}")
+        console.print(f"  [bold]Binary dir:[/]     {env.bin_dir}")
+        console.print()
+
+        console.print("[dim]Checking for relevant changes on GitHub...[/]")
+        changes = check_for_changes(env.build)
+        if not changes:
+            console.print("  [green]✓ No impactful changes since your build.[/]")
+        else:
+            console.print(f"  [yellow]{len(changes)} change(s) may affect GGTune:[/]")
+            for c in changes:
+                flag = " [red][BREAKING][/]" if c.is_breaking else ""
+                areas = ", ".join(c.affected_areas[:3])
+                console.print(f"    b{c.build}  {c.title}{flag}  [dim]({areas})[/]")
+        console.print()
+
+    except RuntimeError as e:
+        console.print(f"  [yellow]llama.cpp not found: {e}[/]\n")
+
+    console.print(Panel(
+        "  [bold cyan][1][/]  Install / rebuild llama.cpp  [dim](auto-detects GPU backend)[/]\n"
+        "  [bold cyan][b][/]  Back",
+        border_style="dim",
+        padding=(1, 4),
+        width=WIDTH,
+    ))
+
+    choice = _ask("Choice: ")
+    if choice == "1":
+        console.print("[dim]Building llama.cpp — this may take 5–20 minutes...[/]")
+        try:
+            env_manager.install(hw)
+            console.print("[green]✓ Done![/]")
+        except Exception as e:
+            console.print(f"[red]Build failed: {e}[/]")
+    _ask("\nPress Enter to go back")
+
+
+# ── Screen 7: Compatibility test ──────────────────────────────────────────────
+
+def _screen_compat() -> None:
+    _clear()
+    _banner("Compatibility Test")
+
+    from ggtune.modules import hardware_scanner, env_manager
+    from ggtune.modules import compat_guard
+
+    hw = hardware_scanner.scan()
+    try:
+        env = env_manager.detect(hw)
+    except RuntimeError as e:
+        console.print(f"[red]llama.cpp not found: {e}[/]")
+        _ask("\nPress Enter to go back")
+        return
+
+    console.print(f"[dim]Testing {env.bin_dir}...[/]\n")
+    try:
+        report = compat_guard.run_tests(env.bin_dir)
+        compat_guard.print_report(report)
+        if report.all_critical_passed:
+            console.print("\n[green]✓ All critical tests passed.[/]")
+        else:
+            console.print("\n[red]✗ Critical tests failed — run option 6 to rebuild.[/]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+
+    _ask("\nPress Enter to go back")
+
+
+# ── Screen 8: Clear all profiles ──────────────────────────────────────────────
+
+def _screen_clear_profiles() -> None:
+    _clear()
+    _banner("Clear All Profiles")
+
+    from ggtune.modules import profile_storage
+    profiles = profile_storage.list_all()
+
+    if not profiles:
+        console.print("  [dim]No profiles found.[/]")
+        _ask("\nPress Enter to go back")
+        return
+
+    console.print(f"  This will delete [bold]{len(profiles)}[/] saved profile(s).")
+    confirm = _ask("  Are you sure? [y/N]: ")
+    if confirm.lower() == "y":
+        try:
+            deleted = profile_storage.delete_all()
+            console.print(f"  [green]✓ Deleted {deleted} profile(s).[/]")
+        except Exception as e:
+            console.print(f"  [red]Error: {e}[/]")
+    else:
+        console.print("  [dim]Cancelled.[/]")
+    _ask("\nPress Enter to go back")
