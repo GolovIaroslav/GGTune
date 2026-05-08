@@ -98,9 +98,8 @@ Results are cached per model + hardware fingerprint. Running it again on the sam
 Everything lives in `~/.llamatune/`:
 
 ```
-~/.llamatune/
-├── env.json      # llama.cpp location and build info
-└── profiles/     # cached benchmark results
+~/.llamatune/env.json       # llama.cpp location and build info
+~/.llamatune/profiles/      # cached benchmark results
 ```
 
 ---
