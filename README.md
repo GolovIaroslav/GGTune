@@ -1,6 +1,10 @@
 # GGTune
 
-Stop guessing llama.cpp parameters. GGTune benchmarks your actual hardware and finds the fastest settings for any GGUF model automatically.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![GitHub stars](https://img.shields.io/github/stars/GolovIaroslav/GGTune?style=social)](https://github.com/GolovIaroslav/GGTune/stargazers)
+
+**Stop guessing llama.cpp parameters.** GGTune benchmarks your actual hardware and finds the fastest settings for any GGUF model automatically.
 
 ```
 $ ggtune run Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf
@@ -26,9 +30,12 @@ Alias written to ~/.zshrc → type 'qwen' to start
 
 ## Why
 
-Running a model with wrong parameters is painful. Too many threads and it's slower than half. Context too large and it crashes. MoE experts in the wrong place and VRAM sits idle. The official docs tell you what the flags do, not what values to use for your specific GPU and model combination.
+Running a GGUF model with wrong parameters is painful:
+- Too many threads → slower than half
+- Context too large → crash
+- MoE experts misconfigured → VRAM sits idle
 
-GGTune runs the actual benchmark with your hardware and your model, searches the parameter space intelligently, and hands you a working configuration.
+The official docs tell you what the flags do, not what values to use for **your specific GPU and model**. GGTune runs the actual benchmark on your hardware, searches the parameter space intelligently, and hands you a working configuration.
 
 ---
 
@@ -56,8 +63,8 @@ pip install ggtune
 Or from source:
 
 ```bash
-git clone https://github.com/yourname/ggtune
-cd ggtune
+git clone https://github.com/GolovIaroslav/GGTune
+cd GGTune
 pip install -e .
 ```
 
@@ -175,13 +182,13 @@ This shows only changes that affect GGTune's functionality — benchmark output 
 
 ## Configuration
 
-GGTune stores everything in `~/.llamatune/`:
+GGTune stores everything in `~/.ggtune/`:
 
 ```
-~/.llamatune/
+~/.ggtune/
 ├── env.json          # llama.cpp install info, pinned build
 ├── profiles/         # cached benchmark results per model+hardware
-└── llamatune.log     # full log of every benchmark run
+└── ggtune.log        # full log of every benchmark run
 ```
 
 To force a fresh benchmark ignoring the cache:
@@ -195,7 +202,7 @@ ggtune run model.gguf --force
 
 The codebase is split into independent modules — hardware scanner, GGUF reader, benchmark engine, HuggingFace browser, compatibility guard. Each module has a clear input/output contract and can be developed and tested in isolation.
 
-The most fragile part is `benchmark_engine.py` — specifically the function that parses `llama-bench` output. If something breaks after a llama.cpp update, that's usually where to look. There are fixture files in `tests/fixtures/` with captured benchmark outputs from different builds for regression testing.
+The most fragile part is `benchmark_engine.py` — specifically the function that parses `llama-bench` output. If something breaks after a llama.cpp update, that's usually where to look.
 
 ```bash
 # Run tests
@@ -208,15 +215,8 @@ pytest tests/test_bench_parser.py -v
 ggtune compat --report
 ```
 
-When llama.cpp changes something that breaks GGTune, the fix is usually:
-1. `ggtune compat --report` to see which test failed
-2. Run the failing command manually to see the new output format
-3. Fix the parser in `benchmark_engine.py`
-4. Update `LLAMA_CPP_PINNED_BUILD` in `config.py`
-5. Add the new output format as a fixture in `tests/fixtures/`
-
 ---
 
 ## License
 
-MIT
+[MIT](LICENSE)
