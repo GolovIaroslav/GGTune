@@ -809,83 +809,201 @@ def _resolve_mmproj(model_path: str) -> Optional[str]:
     return None
 
 
-# ── Screen 6: llama.cpp version / update ─────────────────────────────────────
+# ── Screen 6: llama.cpp manager ───────────────────────────────────────────────
 
 def _screen_llama_update() -> None:
-    _clear()
-    _banner("llama.cpp")
-
     from ggtune.modules import hardware_scanner, env_manager
-    from ggtune.modules.compat_guard import get_latest_build, check_for_changes
+    from ggtune.modules.compat_guard import get_latest_build
+    from ggtune.config import LLAMA_CPP_PINNED_BUILD, LLAMA_INSTALL_DIR
 
     hw = hardware_scanner.scan()
-    env = None
-    current_build = "not found"
+    installs: list = []
+    latest: Optional[str] = None
 
-    try:
-        console.print("  [dim]Searching for llama.cpp...[/]")
-        env = env_manager.detect(hw)
-        current_build = env.build
-        console.print(f"  Installed:  [bold]{env.build}[/]  ({env.backend.value})")
-        console.print(f"  Location:   {env.bin_dir}")
-        console.print(f"  Found via:  [dim]{env.found_via}[/]")
-    except RuntimeError:
-        console.print(f"  [yellow]llama.cpp not installed or not found.[/]")
+    def _refresh() -> None:
+        nonlocal installs, latest
+        installs = env_manager.scan_all(hw)
+        latest = get_latest_build()
 
-    console.print()
-    console.print("  [dim]Checking latest release...[/]")
-    latest = get_latest_build()
+    _refresh()
 
-    if latest and current_build != "not found":
+    while True:
+        _clear()
+        _banner("llama.cpp")
+
+        # Active install
+        active_dir: Optional[str] = None
         try:
-            cur_num = int(current_build.lstrip("b"))
-            lat_num = int(latest.lstrip("b"))
-            diff = lat_num - cur_num
-            if diff <= 0:
-                console.print(f"  [green]✓ Up to date[/] ({current_build})")
+            env = env_manager.detect(hw)
+            active_dir = str(Path(env.bin_dir).resolve())
+        except RuntimeError:
+            pass
+
+        # Show installations table
+        if installs:
+            table = Table(box=box.ROUNDED, header_style="bold", width=WIDTH)
+            table.add_column("#", style="dim", justify="right", width=3)
+            table.add_column("Build", width=7)
+            table.add_column("Backend", width=7)
+            table.add_column("Path")
+            for i, inst in enumerate(installs, 1):
+                is_active = active_dir and (
+                    str(Path(inst.bin_dir).resolve()) == active_dir
+                )
+                path_str = _truncate_path(inst.bin_dir, 42)
+                tag = "  [green]← active[/]" if is_active else ""
+                table.add_row(str(i), inst.build, inst.backend.value, path_str + tag)
+            console.print(table)
+        else:
+            console.print("  [yellow]No llama.cpp installations found.[/]")
+
+        # Latest release + diff
+        console.print()
+        if latest:
+            if active_dir and installs:
+                active_inst = next(
+                    (x for x in installs if str(Path(x.bin_dir).resolve()) == active_dir),
+                    installs[0],
+                )
+                try:
+                    diff = int(latest.lstrip("b")) - int(active_inst.build.lstrip("b"))
+                    if diff <= 0:
+                        console.print(f"  [green]✓ Up to date[/]  ({latest})")
+                    else:
+                        console.print(
+                            f"  Latest: [bold]{latest}[/]  "
+                            f"[dim](active is {diff} version{'s' if diff != 1 else ''} behind)[/]"
+                        )
+                except ValueError:
+                    console.print(f"  Latest: [bold]{latest}[/]")
+            else:
+                console.print(f"  Latest: [bold]{latest}[/]")
+        else:
+            console.print("  [dim]Could not reach GitHub.[/]")
+
+        # Rollback info
+        prev = env_manager.get_previous()
+
+        # Menu
+        can_dl = env_manager.prebuilt_available()
+        lines = []
+        if installs:
+            lines.append(f"  [bold cyan][1–{len(installs)}][/]  Activate this installation")
+        lines.append("  [bold cyan][a][/]  Enter path manually")
+        if can_dl and latest:
+            lines.append(f"  [bold cyan][d][/]  Download latest {latest}  [dim](pre-built, fast)[/]")
+        elif latest:
+            lines.append(f"  [bold cyan][d][/]  Download {latest}  [dim](pre-built — Linux CUDA: not available, use [b]i[/b])[/]")
+        lines.append(
+            f"  [bold cyan][i][/]  Build {LLAMA_CPP_PINNED_BUILD} from source  "
+            f"[dim](~10 min, tested stable)[/]"
+        )
+        if prev:
+            lines.append(f"  [bold cyan][r][/]  Rollback to [dim]{prev[1]}[/]")
+        lines.append("  [bold cyan][s][/]  Deep scan  [dim](find on all drives / everywhere)[/]")
+        lines.append("  [bold cyan][b][/]  Back")
+        console.print(Panel("\n".join(lines), border_style="dim", padding=(1, 2), width=WIDTH))
+
+        choice = _ask("Choice: ").strip().lower()
+
+        if choice in ("b", ""):
+            return
+
+        elif choice == "a":
+            raw = _ask("Path to directory containing llama-bench: ").strip("'\"")
+            p = Path(raw).expanduser()
+            bench = p / env_manager._exe("llama-bench")
+            cli_p = p / env_manager._exe("llama-cli")
+            if not bench.exists() or not cli_p.exists():
+                console.print(f"  [red]llama-bench or llama-cli not found in: {p}[/]")
+                console.print("  [dim]Enter the directory that contains the llama-bench binary.[/]")
+            else:
+                from ggtune.utils.shell import make_env_with_lib as _menv
+                env_d = _menv(str(p))
+                build_v = env_manager._get_build_version(cli_p, env_d) or "unknown"
+                inst = env_manager.LlamaInstall(
+                    bin_dir=str(p), build=build_v,
+                    backend=hw.backend, found_via="manual",
+                )
+                env_manager.set_active(inst)
+                console.print(f"  [green]✓ Activated: {build_v} at {p}[/]")
+            _ask("\nPress Enter to continue")
+
+        elif choice == "d":
+            target = latest or LLAMA_CPP_PINNED_BUILD
+            if not env_manager.prebuilt_available():
+                console.print(
+                    f"  [yellow]Pre-built binaries are not published for Linux CUDA.[/]\n"
+                    "  Use [bold]i[/bold] to build from source instead."
+                )
+                _ask("\nPress Enter to continue")
+                continue
+            dl_dir = LLAMA_INSTALL_DIR.parent / f"llama.cpp.{target}"
+            bin_dir = env_manager.download_prebuilt(hw.backend, target, dl_dir)
+            if bin_dir:
+                from ggtune.utils.shell import make_env_with_lib as _menv
+                cli_p = bin_dir / env_manager._exe("llama-cli")
+                env_d = _menv(str(bin_dir))
+                actual = env_manager._get_build_version(cli_p, env_d) or target
+                inst = env_manager.LlamaInstall(
+                    bin_dir=str(bin_dir), build=actual,
+                    backend=hw.backend, found_via="downloaded",
+                )
+                env_manager.set_active(inst)
+                console.print(f"  [green]✓ Downloaded and activated {actual}.[/]")
+                _refresh()
             else:
                 console.print(
-                    f"  [yellow]Latest: {latest}[/]  "
-                    f"[dim](you're {diff} build{'s' if diff != 1 else ''} behind)[/]"
+                    "  [red]Download failed or no binary available for this platform.[/]\n"
+                    f"  Try [bold]i[/bold] to build from source."
                 )
-                changes = check_for_changes(current_build)
-                breaking = [c for c in changes if c.is_breaking]
-                if breaking:
-                    console.print(f"\n  [red]⚠ {len(breaking)} breaking change(s):[/]")
-                    for c in breaking[:5]:
-                        console.print(f"    b{c.build}  {c.title}")
-        except ValueError:
-            if latest:
-                console.print(f"  Latest: {latest}")
-    elif latest:
-        console.print(f"  Latest available: [bold]{latest}[/]")
-    else:
-        console.print("  [dim]Could not reach GitHub.[/]")
+            _ask("\nPress Enter to continue")
 
-    console.print()
-    from ggtune.config import LLAMA_CPP_PINNED_BUILD
-    menu = f"  [bold cyan][1][/]  Install stable build  [dim](tested: {LLAMA_CPP_PINNED_BUILD}, ~10 min from source)[/]"
-    menu += "\n  [bold cyan][2][/]  Re-scan  [dim](clear cached path, search again)[/]"
-    menu += "\n  [bold cyan][b][/]  Back"
-    console.print(Panel(menu, border_style="dim", padding=(1, 4), width=WIDTH))
+        elif choice == "i":
+            console.print(
+                f"  [dim]Building {LLAMA_CPP_PINNED_BUILD} from source — 5–20 min...[/]"
+            )
+            try:
+                env_manager.install(hw, LLAMA_CPP_PINNED_BUILD)
+                console.print(f"  [green]✓ Built and activated {LLAMA_CPP_PINNED_BUILD}.[/]")
+                _refresh()
+            except Exception as e:
+                console.print(f"  [red]Build failed: {e}[/]")
+            _ask("\nPress Enter to continue")
 
-    choice = _ask("Choice: ")
-    if choice == "1":
-        console.print(f"[dim]Building llama.cpp {LLAMA_CPP_PINNED_BUILD} — this may take 5–20 minutes...[/]")
-        try:
-            env_manager.install(hw)
-            console.print(f"[green]✓ Done! Installed {LLAMA_CPP_PINNED_BUILD}.[/]")
-        except Exception as e:
-            console.print(f"[red]Build failed: {e}[/]")
-    elif choice == "2":
-        env_manager.clear_cache()
-        console.print("  [dim]Cache cleared. Searching...[/]")
-        try:
-            env2 = env_manager.detect(hw)
-            console.print(f"  [green]✓ Found:[/] {env2.bin_dir}  [dim](build {env2.build}, via {env2.found_via})[/]")
-        except RuntimeError as e:
-            console.print(f"  [red]Not found: {e}[/]")
-    _ask("\nPress Enter to go back")
+        elif choice == "r":
+            if prev:
+                if env_manager.rollback():
+                    console.print(f"  [green]✓ Rolled back to {prev[1]}.[/]")
+                    _refresh()
+                else:
+                    console.print("  [red]Rollback failed — path no longer exists.[/]")
+            else:
+                console.print("  [yellow]No previous installation recorded.[/]")
+            _ask("\nPress Enter to continue")
+
+        elif choice == "s":
+            console.print("  [dim]Deep scanning — may take 30–60 seconds...[/]")
+            installs = env_manager.scan_deep(hw)
+            console.print(f"  [green]Found {len(installs)} installation(s).[/]")
+            # loop will redraw
+
+        else:
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(installs):
+                    inst = installs[idx]
+                    env_manager.set_active(inst)
+                    console.print(
+                        f"  [green]✓ Activated: {inst.build} ({inst.backend.value})[/]\n"
+                        f"  [dim]{inst.bin_dir}[/]"
+                    )
+                    _refresh()
+                    _ask("\nPress Enter to continue")
+                else:
+                    console.print(f"  [red]Enter 1–{len(installs)}, a, d, i, r, s, or b.[/]")
+            except ValueError:
+                console.print("  [red]Unknown command.[/]")
 
 
 # ── Screen 7: Compatibility test ──────────────────────────────────────────────

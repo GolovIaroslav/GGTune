@@ -1,4 +1,5 @@
 """Module 3+9: Environment Manager — detects, installs, and configures llama.cpp."""
+import io
 import json
 import os
 import platform
@@ -9,7 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+import requests
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, DownloadColumn
 
 from ggtune.config import (
     LLAMA_CPP_PINNED_BUILD, LLAMA_CPP_REPO,
@@ -27,7 +29,7 @@ def _exe(name: str) -> str:
 
 
 def _get_platform_search_paths() -> list[Path]:
-    """Well-known llama.cpp binary locations per OS — no hardcoded user paths."""
+    """Well-known llama.cpp binary locations per OS."""
     home = Path.home()
     paths: list[Path] = [LLAMA_INSTALL_DIR / "build" / "bin"]
 
@@ -44,6 +46,8 @@ def _get_platform_search_paths() -> list[Path]:
             home / "llama.cpp" / "build" / "bin" / "Release",
             home / "llama.cpp" / "build" / "Release",
             home / "llama.cpp" / "build" / "bin",
+            # Pre-built extract location
+            LLAMA_INSTALL_DIR.parent / "llama.cpp.prebuilt",
         ]
     elif _SYSTEM == "Darwin":
         paths += [
@@ -57,8 +61,8 @@ def _get_platform_search_paths() -> list[Path]:
     else:  # Linux
         paths += [
             home / ".local" / "bin",
-            home / "llama.cpp" / "build" / "bin",
             home / ".local" / "llama.cpp" / "build" / "bin",
+            home / "llama.cpp" / "build" / "bin",
             Path("/usr/local/bin"),
             Path("/usr/bin"),
             Path("/opt/llama.cpp/build/bin"),
@@ -69,7 +73,7 @@ def _get_platform_search_paths() -> list[Path]:
 
 
 def _find_via_system_search(name: str) -> Optional[Path]:
-    """Deep OS-level search (find / where / PowerShell). Used only as last resort."""
+    """Deep OS-level search (find / where / PowerShell). Last resort."""
     exe_name = _exe(name)
     home = Path.home()
 
@@ -82,7 +86,6 @@ def _find_via_system_search(name: str) -> Optional[Path]:
                     return p
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
-        # PowerShell search in personal + program dirs
         for root in filter(None, [
             str(home),
             os.environ.get("LOCALAPPDATA", ""),
@@ -107,7 +110,6 @@ def _find_via_system_search(name: str) -> Optional[Path]:
                 pass
         return None
 
-    # Linux / macOS
     search_roots = [str(home), "/usr/local", "/opt"]
     if _SYSTEM == "Darwin":
         search_roots.append("/opt/homebrew")
@@ -193,6 +195,14 @@ class EnvConfig:
     found_via: str = "unknown"
 
 
+@dataclass
+class LlamaInstall:
+    bin_dir: str
+    build: str
+    backend: Backend
+    found_via: str
+
+
 def _get_build_version(llama_cli: Path, env: dict) -> Optional[str]:
     try:
         r = subprocess.run(
@@ -236,11 +246,14 @@ def _load_env_json() -> Optional[dict]:
 
 def _save_env_json(bin_dir: Path, build: str, backend: Backend) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    data = {
-        "build": build,
-        "bin_dir": str(bin_dir),
-        "backend": backend.value,
-    }
+    data = _load_env_json() or {}
+    # preserve previous for rollback
+    if "bin_dir" in data and str(data["bin_dir"]) != str(bin_dir):
+        data["previous_bin_dir"] = data["bin_dir"]
+        data["previous_build"] = data.get("build", "unknown")
+    data["build"] = build
+    data["bin_dir"] = str(bin_dir)
+    data["backend"] = backend.value
     ENV_FILE.write_text(json.dumps(data, indent=2))
 
 
@@ -290,7 +303,6 @@ def detect(hw: Optional[HardwareProfile] = None) -> EnvConfig:
             "  Fix: run [bold]ggtune update[/] to rebuild with -DGGML_CUDA=ON"
         )
 
-    # Cache the discovered path (skip if already came from cache)
     if found_via != "cache":
         _save_env_json(bin_dir, build, backend)
 
@@ -306,6 +318,260 @@ def detect(hw: Optional[HardwareProfile] = None) -> EnvConfig:
     )
 
 
+# ── Installation scan ──────────────────────────────────────────────────────
+
+def _probe_install(base: Path, hw: Optional[HardwareProfile], via: str) -> Optional[LlamaInstall]:
+    """Check if a directory has a valid llama.cpp install and return LlamaInstall."""
+    bench = base / _exe("llama-bench")
+    cli = base / _exe("llama-cli")
+    if not bench.exists() or not cli.exists():
+        return None
+    env = make_env_with_lib(str(base))
+    build = _get_build_version(cli, env) or "unknown"
+    if hw:
+        backend = hw.backend
+    elif _has_cuda(cli, env):
+        backend = Backend.CUDA
+    else:
+        backend = Backend.CPU
+    return LlamaInstall(bin_dir=str(base), build=build, backend=backend, found_via=via)
+
+
+def scan_all(hw: Optional[HardwareProfile] = None) -> list[LlamaInstall]:
+    """Fast scan: known paths + PATH. Returns all found installations."""
+    found: list[LlamaInstall] = []
+    seen: set[str] = set()
+
+    def _add(base: Path, via: str) -> None:
+        key = str(base.resolve())
+        if key in seen:
+            return
+        seen.add(key)
+        inst = _probe_install(base, hw, via)
+        if inst:
+            found.append(inst)
+
+    # Cached path first (if exists)
+    cached = _cached_bin_dir()
+    if cached:
+        _add(cached, "cache")
+
+    for base in _get_platform_search_paths():
+        _add(base, "known path")
+
+    which_bench = shutil.which(_exe("llama-bench"))
+    if which_bench:
+        _add(Path(which_bench).parent, "PATH")
+
+    return found
+
+
+def scan_deep(hw: Optional[HardwareProfile] = None) -> list[LlamaInstall]:
+    """Deep scan: fast scan + locate/find/where across all drives."""
+    found = scan_all(hw)
+    seen = {str(Path(i.bin_dir).resolve()) for i in found}
+
+    def _add(p: Path, via: str) -> None:
+        key = str(p.resolve())
+        if key in seen:
+            return
+        seen.add(key)
+        inst = _probe_install(p, hw, via)
+        if inst:
+            found.append(inst)
+
+    if _SYSTEM == "Windows":
+        import string
+        for drive in string.ascii_uppercase:
+            root = Path(f"{drive}:\\")
+            if not root.exists():
+                continue
+            try:
+                r = subprocess.run(
+                    ["where", "/R", str(root), _exe("llama-bench")],
+                    capture_output=True, text=True, timeout=30,
+                )
+                for line in r.stdout.splitlines():
+                    p = Path(line.strip())
+                    if p.exists():
+                        _add(p.parent, f"drive {drive}:")
+            except Exception:
+                pass
+    else:
+        # locate (fast, index-based)
+        p = _locate_binary("llama-bench")
+        if p:
+            _add(p.parent, "locate")
+        # find (thorough)
+        p2 = _find_via_system_search("llama-bench")
+        if p2:
+            _add(p2.parent, "find")
+
+    return found
+
+
+# ── Active install management ──────────────────────────────────────────────
+
+def set_active(install: LlamaInstall) -> None:
+    """Set the active llama.cpp installation (with rollback support)."""
+    _save_env_json(Path(install.bin_dir), install.build, install.backend)
+
+
+def get_previous() -> Optional[tuple[str, str]]:
+    """Return (bin_dir, build) of the previous installation for rollback, or None."""
+    data = _load_env_json() or {}
+    prev_dir = data.get("previous_bin_dir")
+    prev_build = data.get("previous_build", "unknown")
+    if not prev_dir:
+        return None
+    p = Path(prev_dir)
+    bench = p / _exe("llama-bench")
+    cli = p / _exe("llama-cli")
+    if bench.exists() and cli.exists():
+        return prev_dir, prev_build
+    return None
+
+
+def rollback() -> bool:
+    """Switch to the previously active installation. Returns True on success."""
+    data = _load_env_json() or {}
+    prev_dir = data.get("previous_bin_dir")
+    prev_build = data.get("previous_build", "unknown")
+    if not prev_dir:
+        return False
+    p = Path(prev_dir)
+    if not (p / _exe("llama-bench")).exists() or not (p / _exe("llama-cli")).exists():
+        return False
+    curr_dir = data.get("bin_dir")
+    curr_build = data.get("build", "unknown")
+    data["previous_bin_dir"] = curr_dir
+    data["previous_build"] = curr_build
+    data["bin_dir"] = prev_dir
+    data["build"] = prev_build
+    ENV_FILE.write_text(json.dumps(data, indent=2))
+    return True
+
+
+# ── Pre-built binary download ──────────────────────────────────────────────
+
+def _pick_prebuilt_asset(assets: list, backend: Backend) -> tuple[Optional[str], Optional[str]]:
+    """Choose the best pre-built binary for current OS/backend from release assets."""
+    sys_key = {"Windows": "win", "Darwin": "macos", "Linux": "ubuntu"}.get(_SYSTEM, "")
+    arch = "arm64" if _SYSTEM == "Darwin" and platform.machine() == "arm64" else "x64"
+
+    scored: list[tuple[int, str, str]] = []
+    for asset in assets:
+        name = asset.get("name", "").lower()
+        url = asset.get("browser_download_url", "")
+        if not url or sys_key not in name:
+            continue
+        score = 0
+        if _SYSTEM == "Windows":
+            if backend == Backend.CUDA and "cuda" in name and arch in name:
+                score = 10
+            elif "avx2" in name and arch in name:
+                score = 5
+            elif "avx" in name and arch in name:
+                score = 3
+            elif arch in name and ("zip" in name or name.endswith(".zip")):
+                score = 1
+        elif _SYSTEM == "Darwin":
+            if arch in name:
+                score = 10
+            elif "universal" in name:
+                score = 5
+        elif _SYSTEM == "Linux":
+            if arch in name:
+                score = 5
+        if score > 0:
+            scored.append((score, url, asset["name"]))
+
+    if not scored:
+        return None, None
+    scored.sort(key=lambda x: -x[0])
+    return scored[0][1], scored[0][2]
+
+
+def prebuilt_available() -> bool:
+    """True if pre-built binaries are published for this OS."""
+    return _SYSTEM in ("Windows", "Darwin")
+
+
+def download_prebuilt(backend: Backend, build: str, install_dir: Path) -> Optional[Path]:
+    """Download a pre-built llama.cpp binary from GitHub releases.
+
+    Returns the bin_dir (where llama-bench lives) or None on failure.
+    Linux CUDA has no pre-built binaries — returns None always on Linux+CUDA.
+    """
+    from rich.console import Console
+    console = Console()
+
+    try:
+        resp = requests.get(
+            f"https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/{build}",
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            console.print(f"  [red]GitHub API error {resp.status_code} for {build}[/]")
+            return None
+        assets = resp.json().get("assets", [])
+    except Exception as e:
+        console.print(f"  [red]Failed to fetch release info: {e}[/]")
+        return None
+
+    asset_url, asset_name = _pick_prebuilt_asset(assets, backend)
+    if not asset_url:
+        console.print(
+            f"  [yellow]No pre-built binary found for {_SYSTEM}/{backend.value} in release {build}.[/]\n"
+            "  Try building from source instead."
+        )
+        return None
+
+    console.print(f"  Downloading [bold]{asset_name}[/] ({build})...")
+    try:
+        r = requests.get(asset_url, stream=True, timeout=300)
+        r.raise_for_status()
+        total = int(r.headers.get("content-length", 0))
+        data_bytes = bytearray()
+        with Progress(SpinnerColumn(), TextColumn("{task.description}"),
+                      BarColumn(), DownloadColumn()) as prog:
+            task = prog.add_task(asset_name, total=total or None)
+            for chunk in r.iter_content(65536):
+                data_bytes.extend(chunk)
+                prog.advance(task, len(chunk))
+    except Exception as e:
+        console.print(f"  [red]Download failed: {e}[/]")
+        return None
+
+    if install_dir.exists():
+        shutil.rmtree(str(install_dir))
+    install_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        if asset_name.lower().endswith(".zip"):
+            import zipfile
+            with zipfile.ZipFile(io.BytesIO(data_bytes)) as zf:
+                zf.extractall(install_dir)
+        else:
+            import tarfile
+            with tarfile.open(fileobj=io.BytesIO(data_bytes)) as tf:
+                tf.extractall(install_dir)
+    except Exception as e:
+        console.print(f"  [red]Extract failed: {e}[/]")
+        return None
+
+    # Locate the directory containing llama-bench
+    exe_name = _exe("llama-bench")
+    for root, _dirs, files in os.walk(install_dir):
+        if exe_name in files:
+            return Path(root)
+
+    console.print("  [red]Extracted but llama-bench not found in archive.[/]")
+    return None
+
+
+# ── Build from source ──────────────────────────────────────────────────────
+
 def _build_llama_cpp(backend: Backend, target_build: str, install_dir: Path) -> Path:
     from rich.console import Console
     console = Console()
@@ -320,18 +586,30 @@ def _build_llama_cpp(backend: Backend, target_build: str, install_dir: Path) -> 
     def run(*cmd, **kwargs):
         result = subprocess.run(list(cmd), **kwargs)
         if result.returncode != 0:
-            raise RuntimeError(f"{cmd[0]} failed")
+            raise RuntimeError(f"{cmd[0]} failed (exit {result.returncode})")
 
     with Progress(SpinnerColumn(), TextColumn("{task.description}"), BarColumn()) as p:
         t = p.add_task("Setting up llama.cpp...", total=4)
 
         if install_dir.exists():
-            run("git", "-C", str(install_dir), "fetch", "--tags", timeout=120)
-            run("git", "-C", str(install_dir), "checkout", target_build, timeout=30)
+            # Try to fetch just the target tag (works on shallow clones)
+            try:
+                run("git", "-C", str(install_dir),
+                    "fetch", "--depth=1", "--no-tags", "origin",
+                    f"refs/tags/{target_build}:refs/tags/{target_build}",
+                    timeout=120)
+                run("git", "-C", str(install_dir), "checkout", target_build, timeout=30)
+            except RuntimeError:
+                # Fresh clone as fallback
+                console.print(f"  [dim]Fetch failed, doing fresh clone of {target_build}...[/]")
+                shutil.rmtree(str(install_dir))
+                install_dir.parent.mkdir(parents=True, exist_ok=True)
+                run("git", "clone", "--depth=1", "--branch", target_build,
+                    LLAMA_CPP_REPO, str(install_dir), timeout=600)
         else:
             install_dir.parent.mkdir(parents=True, exist_ok=True)
             run("git", "clone", "--depth=1", "--branch", target_build,
-                LLAMA_CPP_REPO, str(install_dir), timeout=300)
+                LLAMA_CPP_REPO, str(install_dir), timeout=600)
         p.advance(t)
 
         run("cmake", "-B", "build", "-DCMAKE_BUILD_TYPE=Release", *cmake_flags,
@@ -342,6 +620,7 @@ def _build_llama_cpp(backend: Backend, target_build: str, install_dir: Path) -> 
             f"-j{os.cpu_count()}", cwd=install_dir, timeout=1800)
         p.advance(t)
 
+        # Locate bin dir (Windows MSVC uses build/bin/Release)
         if _SYSTEM == "Windows":
             bin_dir = next(
                 (install_dir / sub for sub in [
@@ -356,22 +635,25 @@ def _build_llama_cpp(backend: Backend, target_build: str, install_dir: Path) -> 
     return bin_dir
 
 
-def install(hw: HardwareProfile) -> EnvConfig:
-    """Install llama.cpp at pinned build with correct backend."""
-    bin_dir = _build_llama_cpp(hw.backend, LLAMA_CPP_PINNED_BUILD, LLAMA_INSTALL_DIR)
-    _save_env_json(bin_dir, LLAMA_CPP_PINNED_BUILD, hw.backend)
+def install(hw: HardwareProfile, build: str = LLAMA_CPP_PINNED_BUILD) -> EnvConfig:
+    """Build llama.cpp from source at the given build tag."""
+    bin_dir = _build_llama_cpp(hw.backend, build, LLAMA_INSTALL_DIR)
+    _save_env_json(bin_dir, build, hw.backend)
 
     bench = bin_dir / _exe("llama-bench")
     cli = bin_dir / _exe("llama-cli")
     server = bin_dir / _exe("llama-server")
     env = make_env_with_lib(str(bin_dir))
 
+    # Read actual built version (may differ if checkout had issues)
+    actual_build = _get_build_version(cli, env) or build
+
     return EnvConfig(
         llama_bench_path=str(bench),
         llama_cli_path=str(cli),
         llama_server_path=str(server) if server.exists() else str(cli),
         bin_dir=str(bin_dir),
-        build=LLAMA_CPP_PINNED_BUILD,
+        build=actual_build,
         backend=hw.backend,
         env_dict=env,
         found_via="installed",
