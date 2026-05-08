@@ -192,44 +192,103 @@ def _screen_model_manager() -> None:
         _banner("Model Manager")
 
         models = model_tracker.list_all()
-        if not models:
-            console.print("  [dim]No downloaded models tracked yet.[/]")
-            console.print(f"  [dim]Models are saved to ~/.llamatune/models/[/]")
-            _ask("\nPress Enter to go back")
-            return
+        scan_dirs = model_tracker.load_scan_dirs()
 
-        table = Table(box=box.ROUNDED, header_style="bold", width=WIDTH)
-        table.add_column("#", style="dim", justify="right")
-        table.add_column("File")
-        table.add_column("Size", justify="right")
-        table.add_column("Downloaded", style="dim")
-        table.add_column("Source", style="dim")
-        for i, m in enumerate(models, 1):
-            table.add_row(
-                str(i), m.filename,
-                f"{m.size_gb:.1f} GB",
-                m.downloaded_at,
-                m.source,
-            )
-        console.print(table)
+        if models:
+            table = Table(box=box.ROUNDED, header_style="bold", width=WIDTH)
+            table.add_column("#", style="dim", justify="right")
+            table.add_column("File")
+            table.add_column("Size", justify="right")
+            table.add_column("Date", style="dim")
+            table.add_column("Type", style="dim")
+            for i, m in enumerate(models, 1):
+                tag = "[dim]HF[/dim]" if m.source_type == "downloaded" else "[dim]local[/dim]"
+                vision = " [cyan]+V[/]" if m.mmproj_path and Path(m.mmproj_path).exists() else ""
+                table.add_row(
+                    str(i), m.filename + vision,
+                    f"{m.size_gb:.1f} GB",
+                    m.downloaded_at, tag,
+                )
+            console.print(table)
+        else:
+            console.print("  [dim]No models tracked yet.[/]")
 
-        choice = _ask("\nNumber to delete, or [b] to go back: ")
+        if scan_dirs:
+            console.print(f"\n  [dim]Scan folders: {', '.join(scan_dirs)}[/]")
+
+        console.print(Panel(
+            "  [bold cyan][number][/]  Delete model\n"
+            "  [bold cyan][a][/]       Add folder to scan\n"
+            "  [bold cyan][r][/]       Rescan all folders\n"
+            "  [bold cyan][d][/]       Remove a scan folder\n"
+            "  [bold cyan][b][/]       Back",
+            border_style="dim", padding=(0, 4), width=WIDTH,
+        ))
+
+        choice = _ask("Choice: ").strip()
+
         if choice.lower() in ("b", ""):
             return
 
-        try:
-            idx = int(choice) - 1
-            target = models[idx]
-        except (ValueError, IndexError):
-            console.print("[red]Invalid choice.[/]")
+        elif choice.lower() == "a":
+            folder = _ask("Folder path: ").strip()
+            if folder:
+                p = Path(folder).expanduser()
+                if p.is_dir():
+                    model_tracker.add_scan_dir(str(p))
+                    console.print(f"[green]✓ Added {p}[/]")
+                else:
+                    console.print("[red]Directory not found.[/]")
             _ask("Press Enter to continue")
-            continue
 
-        confirm = _ask(f"Delete {target.filename}? [y/N]: ")
-        if confirm.lower() == "y":
-            model_tracker.remove(target.path)
-            console.print(f"[green]✓ Deleted {target.filename}[/]")
+        elif choice.lower() == "r":
+            console.print("[dim]Scanning...[/]")
+            n = model_tracker.rescan_dirs()
+            console.print(f"[green]✓ Found {n} new model(s).[/]")
             _ask("Press Enter to continue")
+
+        elif choice.lower() == "d":
+            if not scan_dirs:
+                console.print("[dim]No scan folders configured.[/]")
+                _ask("Press Enter to continue")
+                continue
+            for i, d in enumerate(scan_dirs, 1):
+                console.print(f"  [dim]{i}[/]  {d}")
+            idx_s = _ask("Number to remove: ")
+            try:
+                model_tracker.remove_scan_dir(scan_dirs[int(idx_s) - 1])
+                console.print("[green]✓ Removed.[/]")
+            except (ValueError, IndexError):
+                console.print("[red]Invalid.[/]")
+            _ask("Press Enter to continue")
+
+        else:
+            try:
+                idx = int(choice) - 1
+                target = models[idx]
+            except (ValueError, IndexError):
+                console.print("[red]Invalid choice.[/]")
+                _ask("Press Enter to continue")
+                continue
+
+            if target.source_type == "local":
+                action = _ask(f"[r] remove from list only  [d] delete file  [b] cancel: ").lower()
+                if action == "r":
+                    model_tracker.remove(target.path, delete_file=False)
+                    console.print("[green]✓ Removed from list.[/]")
+                    _ask("Press Enter to continue")
+                elif action == "d":
+                    confirm = _ask(f"Delete file {target.filename}? [y/N]: ")
+                    if confirm.lower() == "y":
+                        model_tracker.remove(target.path, delete_file=True)
+                        console.print(f"[green]✓ Deleted {target.filename}[/]")
+                    _ask("Press Enter to continue")
+            else:
+                confirm = _ask(f"Delete {target.filename}? [y/N]: ")
+                if confirm.lower() == "y":
+                    model_tracker.remove(target.path)
+                    console.print(f"[green]✓ Deleted {target.filename}[/]")
+                    _ask("Press Enter to continue")
 
 
 # ── Main menu ──────────────────────────────────────────────────────────────
@@ -386,8 +445,20 @@ def _scan_gguf_files(search_method: str = "locate") -> List[Tuple[str, int]]:
     return sorted(found.items(), key=lambda x: -x[1])
 
 
+def _format_path(path: str, max_len: int = 55) -> str:
+    """Show path truncated with filename bolded."""
+    p = Path(path)
+    name = p.name
+    parent = str(p.parent)
+    prefix = parent + "/"
+    full = prefix + name
+    if len(full) > max_len:
+        keep = max_len - len(name) - 2  # 2 for "…/"
+        prefix = "…" + prefix[-keep:] if keep > 0 else "…/"
+    return f"{prefix}[bold]{name}[/bold]"
+
+
 def _truncate_path(path: str, max_len: int = 55) -> str:
-    """Show only the rightmost part of a path if it's too long."""
     if len(path) <= max_len:
         return path
     return "…" + path[-(max_len - 1):]
@@ -436,7 +507,7 @@ def _screen_scan() -> Optional[str]:
     table.add_column("Path")
 
     for i, (fpath, size) in enumerate(items, 1):
-        table.add_row(str(i), f"{size / 1e9:.1f} GB", _truncate_path(fpath))
+        table.add_row(str(i), f"{size / 1e9:.1f} GB", _format_path(fpath))
 
     console.print(table)
     console.print(f"\n  Found [bold]{len(items)}[/] model(s).")
@@ -508,9 +579,9 @@ def _screen_browse_manual() -> Optional[str]:
             _ask("Press Enter to try again")
             continue
 
-        console.print(f"[dim]Fetching file list for {model_id}...[/]")
-        files = hf_browser.fetch_gguf_files(model_id)
-        if not files:
+        console.print(f"[dim]Fetching file list for {model_id} — this may take a few seconds...[/]")
+        main_files, mmproj_files = hf_browser.fetch_gguf_files(model_id)
+        if not main_files:
             console.print(f"[red]No GGUF files found in {model_id}. Check the model ID.[/]")
             _ask("Press Enter to try again")
             continue
@@ -521,7 +592,7 @@ def _screen_browse_manual() -> Optional[str]:
         table.add_column("#", style="dim", justify="right")
         table.add_column("File")
         table.add_column("Size", justify="right")
-        for i, f in enumerate(files, 1):
+        for i, f in enumerate(main_files, 1):
             table.add_row(str(i), f["filename"], f"{f['size_gb']:.1f} GB")
         console.print(table)
 
@@ -530,7 +601,7 @@ def _screen_browse_manual() -> Optional[str]:
             continue
         try:
             idx = int(choice) - 1
-            chosen = files[idx]
+            chosen = main_files[idx]
         except (ValueError, IndexError):
             console.print("[red]Invalid choice.[/]")
             _ask("Press Enter to try again")
@@ -540,6 +611,31 @@ def _screen_browse_manual() -> Optional[str]:
         try:
             dest = hf_browser.download_by_id(model_id, chosen["filename"])
             console.print(f"[green]✓ Saved to {dest}[/]")
+
+            # Offer mmproj if model has vision files
+            mmproj_dest = None
+            if mmproj_files:
+                console.print(f"\n  [cyan]This model has {len(mmproj_files)} vision file(s) (mmproj).[/]")
+                table2 = Table(box=box.ROUNDED, header_style="bold", width=WIDTH)
+                table2.add_column("#", style="dim", justify="right")
+                table2.add_column("File")
+                table2.add_column("Size", justify="right")
+                for i, f in enumerate(mmproj_files, 1):
+                    table2.add_row(str(i), f["filename"], f"{f['size_gb']:.1f} GB")
+                console.print(table2)
+                mp_choice = _ask("Download vision file? Enter number or [n] to skip: ")
+                if mp_choice.lower() not in ("n", ""):
+                    try:
+                        mp_idx = int(mp_choice) - 1
+                        mp_file = mmproj_files[mp_idx]
+                        console.print(f"[dim]Downloading {mp_file['filename']}...[/]")
+                        mmproj_dest = hf_browser.download_by_id(model_id, mp_file["filename"])
+                        console.print(f"[green]✓ Vision file saved to {mmproj_dest}[/]")
+                        from ggtune.modules.model_tracker import set_mmproj
+                        set_mmproj(str(dest.resolve()), str(mmproj_dest.resolve()))
+                    except (ValueError, IndexError):
+                        console.print("[dim]Skipping vision file.[/]")
+
             _ask("\nPress Enter to continue")
             return str(dest)
         except Exception as e:
@@ -730,10 +826,34 @@ def _screen_model_and_run(model_path: str) -> None:
     quick = (choice == "2")
     _clear()
 
+    # Vision / mmproj
+    mmproj_path = _resolve_mmproj(model_path)
+
     from ggtune.orchestrator import run as _run
-    _run(model_path, quick=quick)
+    _run(model_path, quick=quick, mmproj_path=mmproj_path)
 
     _ask("\nPress Enter to return to main menu")
+
+
+def _resolve_mmproj(model_path: str) -> Optional[str]:
+    """Ask user about vision (mmproj) before benchmark. Returns mmproj path or None."""
+    from ggtune.modules import model_tracker
+
+    # Check tracker first
+    tracked = model_tracker.find_by_path(model_path)
+    if tracked and tracked.mmproj_path and Path(tracked.mmproj_path).exists():
+        use = _ask(f"  Vision file detected ({Path(tracked.mmproj_path).name}). Include in launch command? [y/N]: ")
+        return tracked.mmproj_path if use.lower() == "y" else None
+
+    # Check same directory for mmproj files
+    mp = model_tracker._find_mmproj_near(Path(model_path))
+    if mp:
+        use = _ask(f"  Vision file found nearby ({mp.name}). Include in launch command? [y/N]: ")
+        if use.lower() == "y":
+            model_tracker.set_mmproj(model_path, str(mp))
+            return str(mp)
+
+    return None
 
 
 # ── Screen 6: llama.cpp version / update ─────────────────────────────────────

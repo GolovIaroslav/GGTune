@@ -7,6 +7,7 @@ CONFIG_DIR = Path.home() / ".llamatune"
 PROFILES_DIR = CONFIG_DIR / "profiles"
 MODELS_DIR = CONFIG_DIR / "models"
 MODELS_INDEX = CONFIG_DIR / "models.json"
+SCAN_DIRS_FILE = CONFIG_DIR / "scan_dirs.json"
 ENV_FILE = CONFIG_DIR / "env.json"
 LOG_FILE = CONFIG_DIR / "llamatune.log"
 

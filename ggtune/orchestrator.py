@@ -3,6 +3,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import Optional
 
 from rich.console import Console
 
@@ -77,6 +78,7 @@ def run(
     force: bool = False,
     auto_build: bool = False,
     quick: bool = False,
+    mmproj_path: Optional[str] = None,
 ) -> None:
     path = Path(model_path)
     if not path.exists():
@@ -166,4 +168,4 @@ def run(
     # Save profile
     profile_storage.save(model, hw, result, bottleneck, total_min)
 
-    advisor.print_report(model, hw, result, env_cfg, total_min)
+    advisor.print_report(model, hw, result, env_cfg, total_min, mmproj_path=mmproj_path)

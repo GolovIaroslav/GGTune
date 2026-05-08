@@ -117,6 +117,7 @@ def recommend(hw: HardwareProfile, author: str = "unsloth", vram_gb: Optional[fl
     # use total VRAM for browse — free VRAM changes constantly and misleads filtering
     vram = vram_gb or hw.vram_total_mb / 1024
 
+    console.print("[dim]Fetching model list from HuggingFace — this may take 10–20 seconds...[/]")
     models = _fetch_models(author)
     if not models:
         return []
@@ -173,15 +174,17 @@ def recommend(hw: HardwareProfile, author: str = "unsloth", vram_gb: Optional[fl
                 downloads=dl_count,
             ))
 
-    # Sort primary by downloads (popularity), secondary by quality score
-    full_fit = sorted(
-        [r for r in recommendations if r.fits_vram],
-        key=lambda x: (x.downloads, x.score), reverse=True,
-    )[:10]
-    ncmoe_fit = sorted(
-        [r for r in recommendations if r.fits_vram_ncmoe],
-        key=lambda x: (x.downloads, x.score), reverse=True,
-    )[:10]
+    # Deduplicate: one entry per model_id — keep best score per group
+    def _best_per_model(recs: List[ModelRecommendation]) -> List[ModelRecommendation]:
+        best: dict = {}
+        for r in recs:
+            prev = best.get(r.model_id)
+            if prev is None or r.score > prev.score:
+                best[r.model_id] = r
+        return sorted(best.values(), key=lambda x: (x.downloads, x.score), reverse=True)
+
+    full_fit = _best_per_model([r for r in recommendations if r.fits_vram])[:10]
+    ncmoe_fit = _best_per_model([r for r in recommendations if r.fits_vram_ncmoe])[:10]
     return full_fit + ncmoe_fit
 
 
@@ -275,32 +278,43 @@ def parse_model_input(text: str) -> Optional[str]:
     return None
 
 
-def fetch_gguf_files(model_id: str) -> List[dict]:
-    """Return list of {filename, size_gb} for all GGUF files in a model repo."""
+def fetch_gguf_files(model_id: str) -> tuple:
+    """Return (main_files, mmproj_files) — each is list of {filename, size_gb}."""
     files = _fetch_files(model_id)
-    result = []
+    main, mmproj = [], []
     for f in files:
         fname = f.get("rfilename", "")
         if not fname.lower().endswith(".gguf"):
             continue
-        size_bytes = f.get("size") or 0
-        result.append({"filename": fname, "size_gb": size_bytes / 1e9})
-    return result
+        size_bytes = f.get("size") or f.get("lfs", {}).get("size", 0) or 0
+        entry = {"filename": fname, "size_gb": size_bytes / 1e9}
+        if "mmproj" in fname.lower():
+            mmproj.append(entry)
+        else:
+            main.append(entry)
+    return main, mmproj
 
 
 def download_by_id(model_id: str, filename: str) -> Path:
     """Download a specific file from a model repo to MODELS_DIR."""
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    dest = MODELS_DIR / filename
+    # filename may include a subpath (e.g. "gguf/file.gguf") — flatten to MODELS_DIR root
+    dest = MODELS_DIR / Path(filename).name
 
     if shutil.which("huggingface-cli"):
-        subprocess.run(
+        # huggingface-cli respects the subpath inside the repo
+        result = subprocess.run(
             ["huggingface-cli", "download", model_id, filename,
              "--local-dir", str(MODELS_DIR)],
             check=True,
         )
+        # huggingface-cli may place file in a subdir — move to root if needed
+        hf_dest = MODELS_DIR / filename
+        if hf_dest.exists() and hf_dest != dest:
+            hf_dest.rename(dest)
     else:
         url = f"https://huggingface.co/{model_id}/resolve/main/{filename}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
         _download_with_progress(url, dest)
 
     from ggtune.modules.model_tracker import register
@@ -324,7 +338,6 @@ def _download_with_progress(url: str, dest: Path) -> None:
 
 
 def interactive_browse(hw: HardwareProfile, author: str = "unsloth", vram_gb: Optional[float] = None) -> Optional[Path]:
-    console.print(f"[dim]Fetching models from {author}...[/]")
     recs = recommend(hw, author, vram_gb)
 
     if not recs:

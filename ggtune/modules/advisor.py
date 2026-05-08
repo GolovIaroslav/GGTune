@@ -41,11 +41,14 @@ def generate_launch_cmd(
     params: dict,
     optimal_ctx: int,
     env_cfg: EnvConfig,
+    mmproj_path: Optional[str] = None,
 ) -> str:
     flags = [
         f"-m {model.path}",
         "-ngl 999",
     ]
+    if mmproj_path:
+        flags.append(f"--mmproj {mmproj_path}")
     if model.is_moe and "ncmoe" in params:
         flags.append(f"-ncmoe {params['ncmoe']}")
     flags += [
@@ -176,6 +179,7 @@ def print_report(
     result: dict,
     env_cfg: EnvConfig,
     total_min: float,
+    mmproj_path: Optional[str] = None,
 ) -> str:
     params = result["best_params"]
     tg = result["tg_tokens_per_sec"]
@@ -197,7 +201,7 @@ def print_report(
         param_parts.append("-nkvo")
     param_str = "  ".join(param_parts)
 
-    launch_cmd = generate_launch_cmd(model, params, ctx, env_cfg)
+    launch_cmd = generate_launch_cmd(model, params, ctx, env_cfg, mmproj_path)
 
     lines = [
         f"[bold]Model:[/]    {model}",
