@@ -1,13 +1,11 @@
-"""Module 8: Advisor & Output — interpret results, generate alias, print report."""
+"""Module 8: Advisor & Output — interpret results, print report."""
 import os
-from datetime import datetime
 from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich import box
-from rich.prompt import Confirm
 
 from typing import Optional
 
@@ -38,8 +36,7 @@ def _bottleneck_text(bottleneck: str) -> str:
     }.get(bottleneck, bottleneck)
 
 
-def generate_alias_cmd(
-    alias_name: str,
+def generate_launch_cmd(
     model: ModelProfile,
     params: dict,
     optimal_ctx: int,
@@ -67,32 +64,7 @@ def generate_alias_cmd(
 
     flags_str = " \\\n  ".join(flags)
     ld = f"LD_LIBRARY_PATH={env_cfg.bin_dir}:$LD_LIBRARY_PATH"
-    cmd = f"{ld} \\\n  {env_cfg.llama_server_path} \\\n  {flags_str}"
-    return f"alias {alias_name}='{cmd} & sleep 3 && xdg-open http://localhost:8080'"
-
-
-def _rc_file(shell: str) -> Optional[Path]:
-    if shell == "zsh":
-        return Path.home() / ".zshrc"
-    if shell == "bash":
-        return Path.home() / ".bashrc"
-    if shell == "fish":
-        return Path.home() / ".config" / "fish" / "config.fish"
-    return None  # Windows / unknown
-
-
-def _write_alias(alias_line: str, shell: str, model_name: str) -> bool:
-    rc = _rc_file(shell)
-    if rc is None:
-        return False
-    try:
-        rc.parent.mkdir(parents=True, exist_ok=True)
-        with rc.open("a") as f:
-            f.write(f"\n# GGTune — {model_name} — {datetime.now().date()}\n")
-            f.write(alias_line + "\n")
-        return True
-    except Exception:
-        return False
+    return f"{ld} \\\n  {env_cfg.llama_server_path} \\\n  {flags_str}"
 
 
 def _build_diagnostics(
@@ -203,7 +175,6 @@ def print_report(
     hw: HardwareProfile,
     result: dict,
     env_cfg: EnvConfig,
-    alias_name: str,
     total_min: float,
 ) -> str:
     params = result["best_params"]
@@ -226,7 +197,7 @@ def print_report(
         param_parts.append("-nkvo")
     param_str = "  ".join(param_parts)
 
-    alias_line = generate_alias_cmd(alias_name, model, params, ctx, env_cfg)
+    launch_cmd = generate_launch_cmd(model, params, ctx, env_cfg)
 
     lines = [
         f"[bold]Model:[/]    {model}",
@@ -242,8 +213,8 @@ def print_report(
         f"  {param_str}",
         f"  -c {ctx}",
         "",
-        "[bold cyan]ALIAS[/]",
-        f"  [dim]{alias_line[:80]}{'...' if len(alias_line) > 80 else ''}[/]",
+        "[bold cyan]LAUNCH COMMAND[/]",
+        f"  [bold]{launch_cmd}[/]",
     ]
 
     if params.get("nkvo"):
@@ -252,19 +223,6 @@ def print_report(
 
     console.print(Panel("\n".join(lines), title="GGTune Results", border_style="cyan"))
     console.print("\n".join(_build_diagnostics(hw, model, result, env_cfg)))
-
-    rc = _rc_file(hw.shell)
-    if rc is not None:
-        if Confirm.ask(f"\nWrite alias '{alias_name}' to {rc}?"):
-            ok = _write_alias(alias_line, hw.shell, model.name)
-            if ok:
-                console.print(f"[green]✓ Alias written. Restart shell or run: source {rc}[/]")
-            else:
-                console.print("[red]Could not write alias. Add manually:[/]")
-                console.print(alias_line)
-    else:
-        console.print("\n[yellow]Windows detected — add this to your PowerShell profile manually:[/]")
-        console.print(alias_line)
 
     return bottleneck
 

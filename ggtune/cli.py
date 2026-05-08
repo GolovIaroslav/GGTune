@@ -24,24 +24,22 @@ def _default(ctx: typer.Context) -> None:
 @app.command()
 def run(
     model: str = typer.Argument(..., help="Path to .gguf model file"),
-    alias: Optional[str] = typer.Option(None, "--alias", "-a", help="Alias name (default: model filename)"),
     force: bool = typer.Option(False, "--force", "-f", help="Ignore cached profile"),
     auto_build: bool = typer.Option(False, "--auto-build", help="Auto-install llama.cpp if missing"),
     quick: bool = typer.Option(False, "--quick", "-q", help="Quick tune (~5 min, no context search)"),
 ) -> None:
     """Benchmark and find optimal llama.cpp parameters for a model."""
     from ggtune.orchestrator import run as _run
-    _run(model, alias_name=alias, force=force, auto_build=auto_build, quick=quick)
+    _run(model, force=force, auto_build=auto_build, quick=quick)
 
 
 @app.command()
 def quick(
     model: str = typer.Argument(..., help="Path to .gguf model file"),
-    alias: Optional[str] = typer.Option(None, "--alias", "-a"),
 ) -> None:
     """Quick tune — probe + Optuna only (~5 minutes)."""
     from ggtune.orchestrator import run as _run
-    _run(model, alias_name=alias, quick=True)
+    _run(model, quick=True)
 
 
 @app.command()

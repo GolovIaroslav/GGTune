@@ -3,7 +3,6 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Optional
 
 from rich.console import Console
 
@@ -75,7 +74,6 @@ class _ThermalWatcher:
 
 def run(
     model_path: str,
-    alias_name: Optional[str] = None,
     force: bool = False,
     auto_build: bool = False,
     quick: bool = False,
@@ -84,8 +82,6 @@ def run(
     if not path.exists():
         error(f"Model not found: {model_path}")
         raise SystemExit(1)
-
-    alias = alias_name or path.stem.lower().replace("-", "_").replace(".", "_")
 
     # Hardware
     info("Scanning hardware...")
@@ -170,5 +166,4 @@ def run(
     # Save profile
     profile_storage.save(model, hw, result, bottleneck, total_min)
 
-    # Report + alias
-    advisor.print_report(model, hw, result, env_cfg, alias, total_min)
+    advisor.print_report(model, hw, result, env_cfg, total_min)
