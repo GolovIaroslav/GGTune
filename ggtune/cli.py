@@ -127,6 +127,96 @@ def info(
 
 
 @app.command()
+def scan(
+    path: Optional[str] = typer.Argument(None, help="Directory to search (default: common locations)"),
+) -> None:
+    """Find .gguf models on your system."""
+    import os
+    import subprocess
+    import platform
+    from rich.table import Table
+    from rich import box
+
+    found: dict[str, int] = {}  # path → size bytes
+
+    def _add(p: Path) -> None:
+        name = p.name.lower()
+        if p.suffix != ".gguf" or not p.is_file():
+            return
+        if "mmproj" in name or "ggml-vocab" in name:
+            return
+        size = p.stat().st_size
+        if size < 50 * 1024 * 1024:  # skip files < 50MB (vocab, test models)
+            return
+        if str(p) not in found:
+            found[str(p)] = size
+
+    def _scan_dir(d: Path) -> None:
+        if not d.exists():
+            return
+        for f in d.rglob("*.gguf"):
+            _add(f)
+
+    if path:
+        _scan_dir(Path(path))
+    else:
+        home = Path.home()
+        system = platform.system()
+
+        standard = [
+            home / "models",
+            home / "Downloads",
+            home / ".cache" / "lm-studio" / "models",
+            home / ".local" / "share" / "models",
+        ]
+        if system == "Darwin":
+            standard.append(home / "Library" / "Application Support" / "LM-Studio" / "models")
+        if system == "Windows":
+            appdata = Path(os.environ.get("APPDATA", home / "AppData" / "Roaming"))
+            standard.append(appdata / "LM-Studio" / "models")
+
+        console.print("[dim]Scanning standard locations...[/]")
+        for d in standard:
+            _scan_dir(d)
+
+        # locate on Linux/macOS for deeper search
+        if system in ("Linux", "Darwin"):
+            try:
+                result = subprocess.run(
+                    ["locate", "-r", r"\.gguf$"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                for line in result.stdout.splitlines():
+                    _add(Path(line.strip()))
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+
+        # Windows: search common drives
+        if system == "Windows":
+            for drive in ["C:", "D:", "E:"]:
+                for folder in ["models", "AI\\models", "LLM"]:
+                    _scan_dir(Path(drive) / folder)
+
+    if not found:
+        console.print("[yellow]No .gguf files found.[/]")
+        console.print("[dim]Try: ggtune scan /path/to/your/models[/]")
+        return
+
+    table = Table(box=box.SIMPLE, show_header=True)
+    table.add_column("#", style="dim", justify="right")
+    table.add_column("Model", min_width=40)
+    table.add_column("Size", justify="right")
+
+    items = sorted(found.items(), key=lambda x: -x[1])
+    for i, (fpath, size) in enumerate(items, 1):
+        size_gb = size / 1e9
+        table.add_row(str(i), fpath, f"{size_gb:.1f} GB")
+
+    console.print(table)
+    console.print(f"[dim]Found {len(found)} models. Run with: ggtune run <path>[/]")
+
+
+@app.command()
 def compat(
     report: bool = typer.Option(False, "--report", "-r", help="Show detailed report"),
     debug: bool = typer.Option(False, "--debug", help="Show raw test output"),
