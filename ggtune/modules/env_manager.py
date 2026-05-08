@@ -573,8 +573,27 @@ def download_prebuilt(backend: Backend, build: str, install_dir: Path) -> Option
 
 # ── Build from source ──────────────────────────────────────────────────────
 
+def _find_bin_dir(root: Path) -> Path:
+    """Find the directory containing llama-bench after a build."""
+    exe = _exe("llama-bench")
+    candidates = [
+        "build/bin/Release", "build/bin", "build/Release", "build", ".",
+    ]
+    for rel in candidates:
+        p = root / rel
+        if (p / exe).exists():
+            return p
+    # deep search as last resort
+    for p in root.rglob(exe):
+        return p.parent
+    raise RuntimeError(
+        f"Build finished but {exe} not found under {root}. "
+        "Check cmake output above for errors."
+    )
+
+
 def _build_llama_cpp(backend: Backend, target_build: str, install_dir: Path) -> Path:
-    """Build llama.cpp from source. Always uses a fresh clone → swap to avoid stale cmake cache."""
+    """Build llama.cpp from source. Always fresh clone → swap, so no stale cmake cache."""
     cmake_flags = {
         Backend.CUDA:  ["-DGGML_CUDA=ON"],
         Backend.ROCM:  ["-DGGML_HIPBLAS=ON"],
@@ -582,49 +601,46 @@ def _build_llama_cpp(backend: Backend, target_build: str, install_dir: Path) -> 
         Backend.CPU:   [],
     }[backend]
 
-    def run(*cmd, **kwargs):
+    def _run(*cmd, **kwargs):
         result = subprocess.run(list(cmd), **kwargs)
         if result.returncode != 0:
-            raise RuntimeError(f"{cmd[0]} failed (exit {result.returncode})")
+            raise RuntimeError(
+                f"{cmd[0]} failed (exit {result.returncode}) — "
+                "scroll up to see cmake/compiler errors"
+            )
 
-    # Build into a temp dir so a failure never corrupts the live install
-    tmp_dir = install_dir.parent / f"llama.cpp.building"
+    tmp_dir = install_dir.parent / "llama.cpp.building"
     if tmp_dir.exists():
         shutil.rmtree(str(tmp_dir))
+    install_dir.parent.mkdir(parents=True, exist_ok=True)
 
-    with Progress(SpinnerColumn(), TextColumn("{task.description}"), BarColumn()) as p:
-        t = p.add_task(f"Building llama.cpp {target_build}...", total=4)
+    from rich.console import Console as _Con
+    con = _Con()
 
-        install_dir.parent.mkdir(parents=True, exist_ok=True)
-        run("git", "clone", "--depth=1", "--branch", target_build,
-            LLAMA_CPP_REPO, str(tmp_dir), timeout=600)
-        p.advance(t)
+    con.print(f"  [dim]Cloning llama.cpp {target_build}...[/]")
+    _run("git", "clone", "--depth=1", "--branch", target_build,
+         LLAMA_CPP_REPO, str(tmp_dir), timeout=600)
 
-        run("cmake", "-B", "build", "-DCMAKE_BUILD_TYPE=Release", *cmake_flags,
-            cwd=tmp_dir, timeout=120)
-        p.advance(t)
+    con.print("  [dim]Running cmake configure...[/]")
+    _run("cmake", "-B", "build", "-DCMAKE_BUILD_TYPE=Release", *cmake_flags,
+         cwd=tmp_dir, timeout=120)
 
-        run("cmake", "--build", "build", "--config", "Release",
-            f"-j{os.cpu_count()}", cwd=tmp_dir, timeout=1800)
-        p.advance(t)
+    con.print(f"  [dim]Compiling with {os.cpu_count()} threads — this takes 5–20 min...[/]")
+    _run("cmake", "--build", "build", "--config", "Release",
+         f"-j{os.cpu_count()}", cwd=tmp_dir, timeout=1800)
 
-        # Locate bin dir (Windows MSVC uses build/bin/Release)
-        if _SYSTEM == "Windows":
-            bin_dir_rel = next(
-                (sub for sub in ["build/bin/Release", "build/Release", "build/bin"]
-                 if (tmp_dir / sub / "llama-bench.exe").exists()),
-                "build/bin/Release",
-            )
-        else:
-            bin_dir_rel = "build/bin"
+    # Detect where binaries actually landed (location changed across llama.cpp versions)
+    bin_dir_in_tmp = _find_bin_dir(tmp_dir)
+    bin_dir_rel = bin_dir_in_tmp.relative_to(tmp_dir)
 
-        # Swap: remove old install, move tmp into place
-        if install_dir.exists():
-            shutil.rmtree(str(install_dir))
-        shutil.move(str(tmp_dir), str(install_dir))
-        p.advance(t)
+    con.print("  [dim]Swapping in new build...[/]")
+    if install_dir.exists():
+        shutil.rmtree(str(install_dir))
+    shutil.move(str(tmp_dir), str(install_dir))
 
-    return install_dir / bin_dir_rel
+    result_bin_dir = install_dir / bin_dir_rel
+    con.print(f"  [green]✓ Binaries at: {result_bin_dir}[/]")
+    return result_bin_dir
 
 
 def install(hw: HardwareProfile, build: str = LLAMA_CPP_PINNED_BUILD) -> EnvConfig:
