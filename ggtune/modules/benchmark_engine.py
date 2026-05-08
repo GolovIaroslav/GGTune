@@ -1,10 +1,9 @@
 """Module 6: Benchmark Engine — phases 6a (quick probe), 6b (Optuna TPE),
 6c (context search), 6d (stability pass)."""
-import re
+import csv
 import statistics
 import subprocess
 import time
-from itertools import product
 from typing import List, Optional, Tuple
 
 import optuna
@@ -31,25 +30,54 @@ console = Console()
 def parse_bench_output(stdout: str) -> Tuple[float, float]:
     """Parse llama-bench output and return (tg_tps, pp_tps).
 
-    llama-bench outputs a CSV or markdown table with pp and tg rows.
-    CSV format: model,size,params,backend,ngl,n_batch,n_ubatch,type_k,type_v,
-                n_threads,type,test,t/s mean,t/s std
+    New format (build 9000+): CSV with header starting 'build_commit,...'
+    Test type determined by n_prompt/n_gen columns; speed in avg_ts.
+    Legacy format: header 'model,...', test type in parts[11], speed in parts[12].
     """
     tg = 0.0
     pp = 0.0
+    lines = stdout.splitlines()
 
-    # Try CSV format first
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line or line.startswith("model") or line.startswith("|"):
+    # New format: header starts with build_commit
+    for i, line in enumerate(lines):
+        if not line.startswith("build_commit,"):
             continue
-        parts = line.split(",")
+        header = line.split(",")
+        try:
+            n_prompt_idx = header.index("n_prompt")
+            n_gen_idx = header.index("n_gen")
+            avg_ts_idx = header.index("avg_ts")
+        except ValueError:
+            break
+        for row in csv.reader(lines[i + 1:]):
+            if len(row) <= max(n_prompt_idx, n_gen_idx, avg_ts_idx):
+                continue
+            try:
+                n_prompt = int(row[n_prompt_idx])
+                n_gen = int(row[n_gen_idx])
+                ts = float(row[avg_ts_idx])
+            except ValueError:
+                continue
+            if n_prompt > 0 and n_gen == 0:
+                pp = max(pp, ts)
+            elif n_gen > 0 and n_prompt == 0:
+                tg = max(tg, ts)
+        if tg > 0 or pp > 0:
+            return tg, pp
+        break
+
+    # Legacy format: header starts with "model"
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith("model,") or s.startswith("|"):
+            continue
+        parts = s.split(",")
         if len(parts) < 13:
             continue
-        test_type = parts[11].strip() if len(parts) > 11 else ""
+        test_type = parts[11].strip().strip('"')
         try:
-            tps = float(parts[12].strip())
-        except (ValueError, IndexError):
+            tps = float(parts[12].strip().strip('"'))
+        except ValueError:
             continue
         if test_type.startswith("tg"):
             tg = max(tg, tps)
@@ -59,9 +87,8 @@ def parse_bench_output(stdout: str) -> Tuple[float, float]:
     if tg > 0 or pp > 0:
         return tg, pp
 
-    # Fallback: markdown table
-    for line in stdout.splitlines():
-        line = line.strip()
+    # Markdown fallback
+    for line in lines:
         if "|" not in line:
             continue
         cols = [c.strip() for c in line.split("|") if c.strip()]
@@ -116,6 +143,18 @@ def _build_cmd(
     return cmd
 
 
+def _kill_llama_procs() -> None:
+    """Kill any lingering llama-bench or llama-cli processes."""
+    import psutil
+    for proc in psutil.process_iter(["pid", "name"]):
+        name = (proc.info["name"] or "").lower()
+        if any(x in name for x in ("llama-bench", "llama-cli")):
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
 def run_bench(
     env_cfg: EnvConfig,
     model: ModelProfile,
@@ -134,18 +173,22 @@ def run_bench(
             env=env_cfg.env_dict,
         )
     except subprocess.TimeoutExpired:
+        _kill_llama_procs()
         return BenchResult(params=params, crashed=True, error="timeout", context=ctx)
     except Exception as e:
+        _kill_llama_procs()
         return BenchResult(params=params, crashed=True, error=str(e), context=ctx)
 
     duration = time.time() - t0
 
     if result.returncode != 0:
+        _kill_llama_procs()
         error_text = result.stderr[:500] if result.stderr else "non-zero exit"
         return BenchResult(params=params, crashed=True, error=error_text, context=ctx, duration_sec=duration)
 
     tg, pp = parse_bench_output(result.stdout)
     if tg == 0 and pp == 0:
+        _kill_llama_procs()
         return BenchResult(params=params, crashed=True, error="no output parsed", context=ctx, duration_sec=duration)
 
     return BenchResult(
