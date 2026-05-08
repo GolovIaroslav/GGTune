@@ -4,7 +4,6 @@ from typing import Optional
 
 import typer
 from rich.console import Console
-from rich.panel import Panel
 
 app = typer.Typer(
     name="ggtune",
@@ -14,134 +13,12 @@ app = typer.Typer(
 console = Console()
 
 
-def _interactive_menu() -> None:
-    """Interactive TUI shown when ggtune is run without arguments."""
-    console.print(Panel(
-        "[bold cyan]GGTune[/] — llama.cpp auto-optimizer\n\n"
-        "  [bold][1][/]  Scan for .gguf models on this machine\n"
-        "  [bold][2][/]  Enter model path manually\n"
-        "  [bold][3][/]  Browse HuggingFace models\n"
-        "  [bold][4][/]  Show saved benchmark profiles\n"
-        "  [bold][5][/]  Hardware info\n"
-        "  [bold][q][/]  Exit",
-        border_style="cyan",
-    ))
-    try:
-        choice = input("Choice: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        return
-
-    if choice == "1":
-        _menu_scan()
-    elif choice == "2":
-        _menu_manual()
-    elif choice == "3":
-        from ggtune.modules import hardware_scanner, hf_browser
-        hw = hardware_scanner.scan()
-        path = hf_browser.interactive_browse(hw)
-        if path and typer.confirm(f"\nRun benchmark on {path.name}?"):
-            from ggtune.orchestrator import run as _run
-            _run(str(path))
-    elif choice == "4":
-        _menu_profiles()
-    elif choice == "5":
-        _menu_hw()
-    # q / anything else → exit
-
-
-def _menu_scan() -> None:
-    import os
-    import subprocess
-    import platform
-
-    found: dict[str, int] = {}
-
-    def _add(p: Path) -> None:
-        name = p.name.lower()
-        if p.suffix != ".gguf" or not p.is_file():
-            return
-        if "mmproj" in name or "ggml-vocab" in name:
-            return
-        if p.stat().st_size < 50 * 1024 * 1024:
-            return
-        found[str(p)] = p.stat().st_size
-
-    home = Path.home()
-    for d in [home / "models", home / "Downloads",
-              home / ".cache" / "lm-studio" / "models",
-              home / ".local" / "share" / "models"]:
-        if d.exists():
-            for f in d.rglob("*.gguf"):
-                _add(f)
-
-    if platform.system() in ("Linux", "Darwin"):
-        try:
-            r = subprocess.run(["locate", "-r", r"\.gguf$"],
-                               capture_output=True, text=True, timeout=15)
-            for line in r.stdout.splitlines():
-                _add(Path(line.strip()))
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-
-    if not found:
-        console.print("[yellow]No .gguf files found.[/]")
-        return
-
-    items = sorted(found.items(), key=lambda x: -x[1])
-    console.print()
-    for i, (fpath, size) in enumerate(items, 1):
-        console.print(f"  [dim]{i:2}.[/]  {size / 1e9:5.1f} GB  {fpath}")
-
-    console.print()
-    try:
-        pick = input("Run benchmark on # (or Enter to skip): ").strip()
-    except (EOFError, KeyboardInterrupt):
-        return
-    if pick.isdigit():
-        idx = int(pick) - 1
-        if 0 <= idx < len(items):
-            from ggtune.orchestrator import run as _run
-            _run(items[idx][0])
-
-
-def _menu_manual() -> None:
-    try:
-        path = input("Model path: ").strip().strip("'\"")
-    except (EOFError, KeyboardInterrupt):
-        return
-    if path:
-        from ggtune.orchestrator import run as _run
-        _run(path)
-
-
-def _menu_profiles() -> None:
-    from ggtune.modules import profile_storage
-    profiles = profile_storage.list_all()
-    if not profiles:
-        console.print("[dim]No saved profiles.[/]")
-        return
-    for p in profiles:
-        console.print(
-            f"[bold]{p.model_name}[/] ({p.model_quantization})  "
-            f"[green]{p.tg_tokens_per_sec:.1f} t/s[/]  "
-            f"ctx={p.optimal_context:,}  "
-            f"[dim]{p.created_at[:10]}  {p.hw_gpu_name}[/]"
-        )
-
-
-def _menu_hw() -> None:
-    from ggtune.modules import hardware_scanner
-    info = hardware_scanner.scan()
-    console.print(f"[bold]GPU:[/]  {info.gpu_name}  {info.vram_total_mb // 1024}GB  ({info.backend.value})")
-    console.print(f"[bold]CPU:[/]  {info.cpu_name}  {info.cores_physical}P / {info.cores_logical}L cores")
-    console.print(f"[bold]RAM:[/]  {info.ram_total_gb:.1f}GB total / {info.ram_available_gb:.1f}GB free")
-
-
 @app.callback(invoke_without_command=True)
 def _default(ctx: typer.Context) -> None:
+    """Launch interactive TUI when no subcommand is given."""
     if ctx.invoked_subcommand is None:
-        _interactive_menu()
-
+        from ggtune.tui import main_menu
+        main_menu()
 
 
 @app.command()
@@ -192,7 +69,6 @@ def show(
     if not profiles:
         console.print("[dim]No saved profiles.[/]")
         return
-
     for p in profiles:
         match = not model or model in p.model_path
         if match:
@@ -227,15 +103,15 @@ def clear(
 def hw() -> None:
     """Show hardware information."""
     from ggtune.modules import hardware_scanner
-    info = hardware_scanner.scan()
-    console.print(f"[bold]GPU:[/]  {info.gpu_name}  {info.vram_total_mb // 1024}GB total / {info.vram_free_mb // 1024}GB free  ({info.backend.value})")
-    console.print(f"[bold]CPU:[/]  {info.cpu_name}  {info.cores_physical} physical / {info.cores_logical} logical cores")
-    console.print(f"[bold]RAM:[/]  {info.ram_total_gb:.1f}GB total / {info.ram_available_gb:.1f}GB available")
-    console.print(f"[bold]OS:[/]   {info.os}  shell={info.shell}")
-    if info.driver_version:
-        console.print(f"[bold]Driver:[/] {info.driver_version}")
-    if info.compute_cap:
-        console.print(f"[bold]CUDA:[/]  compute {info.compute_cap}")
+    i = hardware_scanner.scan()
+    console.print(f"[bold]GPU:[/]  {i.gpu_name}  {i.vram_total_mb // 1024}GB total / {i.vram_free_mb // 1024}GB free  ({i.backend.value})")
+    console.print(f"[bold]CPU:[/]  {i.cpu_name}  {i.cores_physical} physical / {i.cores_logical} logical cores")
+    console.print(f"[bold]RAM:[/]  {i.ram_total_gb:.1f}GB total / {i.ram_available_gb:.1f}GB available")
+    console.print(f"[bold]OS:[/]   {i.os}  shell={i.shell}")
+    if i.driver_version:
+        console.print(f"[bold]Driver:[/] {i.driver_version}")
+    if i.compute_cap:
+        console.print(f"[bold]CUDA:[/]  compute {i.compute_cap}")
 
 
 @app.command()
@@ -251,7 +127,7 @@ def info(
     if m.is_moe:
         console.print(f"[bold]Experts:[/]      {m.n_experts_total} total / {m.n_experts_used} used")
     console.print(f"[bold]Layers:[/]       {m.n_layers}")
-    console.print(f"[bold]Heads:[/]        {m.n_heads}")
+    console.print(f"[bold]Heads:[/]        {m.n_heads}  KV: {m.n_kv_heads or '?'}")
     console.print(f"[bold]Max context:[/]  {m.context_length_max:,}")
     console.print(f"[bold]Quantization:[/] {m.quantization}")
     console.print(f"[bold]File size:[/]    {m.file_size_gb:.2f} GB")
@@ -262,83 +138,30 @@ def scan(
     path: Optional[str] = typer.Argument(None, help="Directory to search (default: common locations)"),
 ) -> None:
     """Find .gguf models on your system."""
-    import os
-    import subprocess
+    from ggtune.tui import _scan_gguf_files
     import platform
-    from rich.table import Table
-    from rich import box
-
-    found: dict[str, int] = {}  # path → size bytes
-
-    def _add(p: Path) -> None:
-        name = p.name.lower()
-        if p.suffix != ".gguf" or not p.is_file():
-            return
-        if "mmproj" in name or "ggml-vocab" in name:
-            return
-        size = p.stat().st_size
-        if size < 50 * 1024 * 1024:  # skip files < 50MB (vocab, test models)
-            return
-        if str(p) not in found:
-            found[str(p)] = size
-
-    def _scan_dir(d: Path) -> None:
-        if not d.exists():
-            return
-        for f in d.rglob("*.gguf"):
-            _add(f)
 
     if path:
-        _scan_dir(Path(path))
+        from pathlib import Path as _Path
+        found = {}
+        def _add(p):
+            n = p.name.lower()
+            if p.suffix != ".gguf" or not p.is_file(): return
+            if "mmproj" in n or "ggml-vocab" in n: return
+            if p.stat().st_size < 50 * 1024 * 1024: return
+            found[str(p)] = p.stat().st_size
+        for f in _Path(path).rglob("*.gguf"):
+            _add(f)
+        items = sorted(found.items(), key=lambda x: -x[1])
     else:
-        home = Path.home()
-        system = platform.system()
+        items = _scan_gguf_files()
 
-        standard = [
-            home / "models",
-            home / "Downloads",
-            home / ".cache" / "lm-studio" / "models",
-            home / ".local" / "share" / "models",
-        ]
-        if system == "Darwin":
-            standard.append(home / "Library" / "Application Support" / "LM-Studio" / "models")
-        if system == "Windows":
-            appdata = Path(os.environ.get("APPDATA", home / "AppData" / "Roaming"))
-            standard.append(appdata / "LM-Studio" / "models")
-
-        console.print("[dim]Scanning standard locations...[/]")
-        for d in standard:
-            _scan_dir(d)
-
-        # locate on Linux/macOS for deeper search
-        if system in ("Linux", "Darwin"):
-            try:
-                result = subprocess.run(
-                    ["locate", "-r", r"\.gguf$"],
-                    capture_output=True, text=True, timeout=15,
-                )
-                for line in result.stdout.splitlines():
-                    _add(Path(line.strip()))
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                pass
-
-        # Windows: search common drives
-        if system == "Windows":
-            for drive in ["C:", "D:", "E:"]:
-                for folder in ["models", "AI\\models", "LLM"]:
-                    _scan_dir(Path(drive) / folder)
-
-    if not found:
+    if not items:
         console.print("[yellow]No .gguf files found.[/]")
-        console.print("[dim]Try: ggtune scan /path/to/your/models[/]")
         return
-
-    items = sorted(found.items(), key=lambda x: -x[1])
     for i, (fpath, size) in enumerate(items, 1):
-        size_gb = size / 1e9
-        print(f"  {i:2}.  {size_gb:5.1f} GB  {fpath}")
-
-    print(f"\nFound {len(found)} models. Run with: ggtune run <path>")
+        print(f"  {i:2}.  {size / 1e9:5.1f} GB  {fpath}")
+    print(f"\nFound {len(items)} models. Run with: ggtune run <path>")
 
 
 @app.command()
@@ -369,11 +192,13 @@ def compat(
 @app.command()
 def update(
     check: bool = typer.Option(False, "--check", help="Check for relevant llama.cpp changes (no update)"),
-    to: Optional[str] = typer.Option(None, "--to", help="Target build (e.g. b5391)"),
+    to: Optional[str] = typer.Option(None, "--to", help="Target build (e.g. b9014)"),
 ) -> None:
     """Update llama.cpp (safe: compat tests before swap)."""
     from ggtune.modules import env_manager, compat_guard
     from ggtune.config import LLAMA_CPP_PINNED_BUILD
+    import shutil
+    from ggtune.config import LLAMA_INSTALL_DIR
 
     try:
         env_cfg = env_manager.detect()
@@ -391,8 +216,6 @@ def update(
     from ggtune.modules.hardware_scanner import scan
     hw = scan()
 
-    import shutil
-    from ggtune.config import LLAMA_INSTALL_DIR
     temp_dir = LLAMA_INSTALL_DIR.parent / "llama.cpp.new"
     old_dir = LLAMA_INSTALL_DIR.parent / "llama.cpp.old"
 
