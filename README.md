@@ -6,7 +6,7 @@ Finds the fastest llama.cpp parameters for your GPU and model by actually runnin
 $ ggtune
 ```
 
-Interactive TUI guides you through scanning for models, running benchmarks, and getting a ready-to-run launch command.
+No config files. Just point it at a model and it figures out the best settings for your machine.
 
 ---
 
@@ -42,7 +42,7 @@ uv sync
 uv run ggtune
 ```
 
-If you already have llama.cpp built somewhere, GGTune will find it automatically. If not, it can build it for you from the TUI (option 6).
+If you already have llama.cpp built somewhere, GGTune will find it automatically. If not, choose **"llama.cpp — version / update"** from the main menu to build it.
 
 ---
 
@@ -76,20 +76,16 @@ ggtune help                            # show all commands
 
 ---
 
-## Supported models
-
-Any GGUF format. The main focus is quantized models from [unsloth](https://huggingface.co/unsloth) and [bartowski](https://huggingface.co/bartowski) — the search space is tuned for them. Dense models and MoE models both work.
-
----
-
 ## How the benchmark works
 
-1. Quick grid probe — tries a coarse set of parameter combinations to eliminate bad regions
-2. Bayesian search — Optuna TPE, warm-started from probe results, ~30 trials
-3. Context search — binary search to find the largest context where speed stays above 60% of peak
-4. Stability check — runs the winner 3× to confirm results are consistent
+1. Grid probe — coarse sweep to eliminate bad parameter regions
+2. Bayesian search — Optuna TPE, ~30 trials, warm-started from probe results
+3. Context search — finds the largest context where speed stays above 60% of peak
+4. Stability pass — reruns the winner to confirm results are consistent
 
 Results are cached per model + hardware fingerprint. Running it again on the same model is instant.
+
+Built with: Python, [Optuna](https://optuna.org), [Rich](https://github.com/Textualize/rich), [llama.cpp](https://github.com/ggerganov/llama.cpp).
 
 ---
 
