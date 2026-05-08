@@ -182,13 +182,13 @@ This shows only changes that affect GGTune's functionality — benchmark output 
 
 ## Configuration
 
-GGTune stores everything in `~/.ggtune/`:
+GGTune stores everything in `~/.llamatune/`:
 
 ```
-~/.ggtune/
+~/.llamatune/
 ├── env.json          # llama.cpp install info, pinned build
 ├── profiles/         # cached benchmark results per model+hardware
-└── ggtune.log        # full log of every benchmark run
+└── llamatune.log     # full log of every benchmark run
 ```
 
 To force a fresh benchmark ignoring the cache:
