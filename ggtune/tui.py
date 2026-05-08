@@ -41,13 +41,167 @@ def _sep() -> None:
     console.print(Rule(style="dim"))
 
 
+# ── Setup wizard ───────────────────────────────────────────────────────────
+
+_DRIVER_MIN = {"Windows": 527, "Darwin": 0, "Linux": 525}
+
+
+def _driver_ok(version_str: Optional[str]) -> bool:
+    if not version_str:
+        return False
+    try:
+        return int(version_str.split(".")[0]) >= _DRIVER_MIN.get(platform.system(), 525)
+    except (ValueError, IndexError):
+        return True
+
+
+def _has_bin(name: str) -> bool:
+    import shutil as _shutil
+    return _shutil.which(name) is not None
+
+
+def _screen_setup(hw) -> None:
+    """First-run wizard: detects missing deps and offers to install llama.cpp."""
+    from ggtune.modules import env_manager
+
+    _clear()
+    _banner("Setup")
+
+    has_gpu = hw.backend.value != "cpu"
+    drv_ok = _driver_ok(hw.driver_version)
+    drv_str = hw.driver_version or "not detected"
+    minimum = _DRIVER_MIN.get(platform.system(), 525)
+
+    # System status table
+    t = Table.grid(padding=(0, 2))
+    t.add_column(style="dim", min_width=10)
+    t.add_column(min_width=28)
+    t.add_column()
+
+    gpu_label = f"{hw.gpu_name}  ({hw.vram_total_mb // 1024} GB)" if has_gpu else "none detected"
+    t.add_row("GPU:", gpu_label, "[green]✓[/]" if has_gpu else "[dim]-[/]")
+
+    if has_gpu:
+        drv_status = "[green]✓[/]" if drv_ok else f"[red]✗ need ≥{minimum}[/]"
+        t.add_row("Driver:", drv_str, drv_status)
+
+    t.add_row("llama.cpp:", "[red]not found[/]", "[red]✗[/]")
+    console.print(t)
+    console.print()
+
+    # Driver warning with fix instructions
+    if has_gpu and not drv_ok:
+        console.print(f"  [yellow]NVIDIA driver too old for CUDA 12.4 (need ≥{minimum}).[/]")
+        if platform.system() == "Linux":
+            console.print("  Fix:  [dim]sudo apt install nvidia-driver-550[/]")
+            console.print("        [dim](or: ubuntu-drivers autoinstall)[/]")
+        elif platform.system() == "Windows":
+            console.print("  Fix:  [dim]nvidia.com/drivers — download and run installer[/]")
+        console.print("  You can still build CPU-only and use GPU after updating drivers.\n")
+
+    # Check build prerequisites
+    has_git   = _has_bin("git")
+    has_cmake = _has_bin("cmake")
+    has_cxx   = _has_bin("g++") or _has_bin("clang++") or _has_bin("cl")
+    prereqs   = has_git and has_cmake and has_cxx
+
+    console.print("  Build prerequisites:")
+    console.print(f"    git     {'[green]✓[/]' if has_git   else '[red]✗[/]'}")
+    console.print(f"    cmake   {'[green]✓[/]' if has_cmake else '[red]✗[/]'}")
+    console.print(f"    c++     {'[green]✓[/]' if has_cxx   else '[red]✗[/]'}")
+    console.print()
+
+    if not prereqs:
+        console.print("  [yellow]Install missing tools first:[/]")
+        if platform.system() == "Linux":
+            console.print("    [dim]sudo apt install git cmake build-essential[/]  (Debian/Ubuntu)")
+            console.print("    [dim]sudo dnf install git cmake gcc-c++[/]  (Fedora/RHEL)")
+        elif platform.system() == "Darwin":
+            console.print("    [dim]brew install git cmake[/]")
+            console.print("    [dim]xcode-select --install[/]")
+        elif platform.system() == "Windows":
+            console.print("    [dim]Install: Visual Studio Build Tools + CMake + Git[/]")
+        console.print()
+
+    can_cuda = has_gpu and drv_ok and prereqs
+    can_cpu  = prereqs
+
+    lines = []
+    if can_cuda:
+        lines.append("  [bold cyan][1][/]  Build with CUDA  [dim](GPU — recommended, ~10 min)[/]")
+    elif has_gpu and not drv_ok:
+        lines.append("  [dim][1]  Build with CUDA — update drivers first[/]")
+    if can_cpu:
+        lines.append("  [bold cyan][2][/]  Build CPU-only  [dim](works without GPU, ~5 min)[/]")
+    lines.append("  [bold cyan][3][/]  Already installed — re-scan  [dim](PATH / custom location)[/]")
+    lines.append("  [bold cyan][s][/]  Skip  [dim](main menu, benchmarks won't work)[/]")
+
+    console.print(Panel("\n".join(lines), border_style="dim", padding=(1, 4), width=WIDTH))
+    choice = _ask("Choice: ")
+
+    if choice == "1" and can_cuda:
+        console.print("\n  [dim]Building llama.cpp with CUDA — may take 5–20 min...[/]")
+        try:
+            env_manager.install(hw)
+            console.print("  [green]✓ Done! llama.cpp installed.[/]")
+        except Exception as e:
+            console.print(f"  [red]Build failed: {e}[/]")
+        _ask("\nPress Enter to continue")
+
+    elif choice == "2" and can_cpu:
+        hw.backend = __import__("ggtune.models.hardware", fromlist=["Backend"]).Backend.CPU
+        console.print("\n  [dim]Building CPU-only llama.cpp — ~5 min...[/]")
+        try:
+            env_manager.install(hw)
+            console.print("  [green]✓ Done! CPU-only llama.cpp installed.[/]")
+        except Exception as e:
+            console.print(f"  [red]Build failed: {e}[/]")
+        _ask("\nPress Enter to continue")
+
+    elif choice == "3":
+        env_manager.clear_cache()
+        console.print("  [dim]Scanning...[/]")
+        try:
+            found = env_manager.detect(hw)
+            console.print(f"  [green]✓ Found:[/] {found.bin_dir}  [dim](via {found.found_via})[/]")
+        except RuntimeError:
+            console.print(
+                "  [red]Not found.[/]\n"
+                "  Make sure [bold]llama-bench[/] is in your PATH, or add its directory to PATH and re-run."
+            )
+        _ask("\nPress Enter to continue")
+    # "s" or anything else → fall through to main menu
+
+
+def _maybe_run_setup() -> None:
+    """Run setup wizard once if llama.cpp is not found."""
+    from ggtune.modules import hardware_scanner, env_manager
+    hw = hardware_scanner.scan()
+    try:
+        env_manager.detect(hw)
+    except RuntimeError:
+        _screen_setup(hw)
+
+
 # ── Main menu ──────────────────────────────────────────────────────────────
 
 def main_menu() -> None:
     """Entry point. Loops until user exits."""
+    _maybe_run_setup()
+
     while True:
         _clear()
         _banner()
+
+        # Status line: show llama.cpp build if found
+        from ggtune.modules import env_manager as _em
+        try:
+            _env = _em.detect()
+            _status = f"  [dim]llama.cpp {_env.build}  ·  {_env.backend.value}  ·  {_env.bin_dir}[/]\n"
+        except RuntimeError:
+            _status = "  [yellow]⚠ llama.cpp not found — go to option 6 to install[/]\n"
+        console.print(_status)
+
         console.print(Panel(
             "  [bold cyan][1][/]  Scan for models on this machine\n"
             "  [bold cyan][2][/]  Enter model path manually\n"
