@@ -812,6 +812,40 @@ def _resolve_mmproj(model_path: str) -> Optional[str]:
     return None
 
 
+# ── llama.cpp install helper ──────────────────────────────────────────────────
+
+def _do_install(target: str, hw, env_manager, install_dir) -> None:
+    """Download pre-built (Win/Mac) or build from source (Linux). Activates on success."""
+    from ggtune.utils.shell import make_env_with_lib as _menv
+
+    if env_manager.prebuilt_available():
+        console.print(f"  [dim]Downloading pre-built {target}...[/]")
+        dl_dir = install_dir.parent / f"llama.cpp.{target}"
+        bin_dir = env_manager.download_prebuilt(hw.backend, target, dl_dir)
+        if bin_dir:
+            cli_p = bin_dir / env_manager._exe("llama-cli")
+            actual = env_manager._get_build_version(cli_p, _menv(str(bin_dir))) or target
+            inst = env_manager.LlamaInstall(
+                bin_dir=str(bin_dir), build=actual,
+                backend=hw.backend, found_via="downloaded",
+            )
+            env_manager.set_active(inst)
+            console.print(f"  [green]✓ Downloaded and activated {actual}.[/]")
+            return
+        console.print(
+            f"  [yellow]No pre-built binary for {target} on this platform.[/]\n"
+            "  Falling back to build from source..."
+        )
+
+    # Build from source (Linux always; Win/Mac as fallback)
+    console.print(f"  [dim]Building {target} from source — 5–20 min...[/]")
+    try:
+        env_cfg = env_manager.install(hw, target)
+        console.print(f"  [green]✓ Built and activated {env_cfg.build}.[/]")
+    except Exception as e:
+        console.print(f"  [red]Build failed: {e}[/]")
+
+
 # ── Screen 6: llama.cpp manager ───────────────────────────────────────────────
 
 def _screen_llama_update() -> None:
@@ -888,16 +922,13 @@ def _screen_llama_update() -> None:
         prev = env_manager.get_previous()
 
         # Compact hint line (models-screen style)
-        can_dl = env_manager.prebuilt_available()
         hints = []
         if installs:
             hints.append("[bold]number[/bold] — activate")
         hints.append("[bold]a[/bold] — add path")
-        dl_label = f"[bold]d[/bold] — download {latest}" if latest else "[bold]d[/bold] — download"
-        if not can_dl:
-            dl_label += " [dim](Win/Mac only)[/dim]"
-        hints.append(dl_label)
-        hints.append(f"[bold]i[/bold] — build {LLAMA_CPP_PINNED_BUILD}")
+        if latest:
+            hints.append(f"[bold]u[/bold] — update to {latest}")
+        hints.append("[bold]i[/bold] — install version...")
         if prev:
             hints.append(f"[bold]r[/bold] — rollback to {prev[1]}")
         hints.append("[bold]s[/bold] — deep scan")
@@ -910,13 +941,12 @@ def _screen_llama_update() -> None:
             return
 
         elif choice == "a":
-            raw = _ask("Path to directory containing llama-bench: ").strip("'\"")
+            raw = _ask("Path to directory with llama-bench: ").strip("'\"")
             p = Path(raw).expanduser()
             bench = p / env_manager._exe("llama-bench")
             cli_p = p / env_manager._exe("llama-cli")
             if not bench.exists() or not cli_p.exists():
                 console.print(f"  [red]llama-bench or llama-cli not found in: {p}[/]")
-                console.print("  [dim]Enter the directory that contains the llama-bench binary.[/]")
             else:
                 from ggtune.utils.shell import make_env_with_lib as _menv
                 env_d = _menv(str(p))
@@ -929,46 +959,21 @@ def _screen_llama_update() -> None:
                 console.print(f"  [green]✓ Activated: {build_v} at {p}[/]")
             _ask("\nPress Enter to continue")
 
-        elif choice == "d":
-            target = latest or LLAMA_CPP_PINNED_BUILD
-            if not env_manager.prebuilt_available():
-                console.print(
-                    f"  [yellow]Pre-built binaries are not published for Linux CUDA.[/]\n"
-                    "  Use [bold]i[/bold] to build from source instead."
-                )
-                _ask("\nPress Enter to continue")
-                continue
-            dl_dir = LLAMA_INSTALL_DIR.parent / f"llama.cpp.{target}"
-            bin_dir = env_manager.download_prebuilt(hw.backend, target, dl_dir)
-            if bin_dir:
-                from ggtune.utils.shell import make_env_with_lib as _menv
-                cli_p = bin_dir / env_manager._exe("llama-cli")
-                env_d = _menv(str(bin_dir))
-                actual = env_manager._get_build_version(cli_p, env_d) or target
-                inst = env_manager.LlamaInstall(
-                    bin_dir=str(bin_dir), build=actual,
-                    backend=hw.backend, found_via="downloaded",
-                )
-                env_manager.set_active(inst)
-                console.print(f"  [green]✓ Downloaded and activated {actual}.[/]")
-                _refresh()
-            else:
-                console.print(
-                    "  [red]Download failed or no binary available for this platform.[/]\n"
-                    f"  Try [bold]i[/bold] to build from source."
-                )
+        elif choice == "u":
+            _do_install(latest or LLAMA_CPP_PINNED_BUILD, hw, env_manager, LLAMA_INSTALL_DIR)
+            _refresh()
             _ask("\nPress Enter to continue")
 
         elif choice == "i":
-            console.print(
-                f"  [dim]Building {LLAMA_CPP_PINNED_BUILD} from source — 5–20 min...[/]"
-            )
-            try:
-                env_manager.install(hw, LLAMA_CPP_PINNED_BUILD)
-                console.print(f"  [green]✓ Built and activated {LLAMA_CPP_PINNED_BUILD}.[/]")
-                _refresh()
-            except Exception as e:
-                console.print(f"  [red]Build failed: {e}[/]")
+            raw = _ask(
+                f"Build number (e.g. b9072 or 9072, Enter = stable {LLAMA_CPP_PINNED_BUILD}): "
+            ).strip()
+            if not raw:
+                target = LLAMA_CPP_PINNED_BUILD
+            else:
+                target = raw if raw.startswith("b") else f"b{raw}"
+            _do_install(target, hw, env_manager, LLAMA_INSTALL_DIR)
+            _refresh()
             _ask("\nPress Enter to continue")
 
         elif choice == "r":
