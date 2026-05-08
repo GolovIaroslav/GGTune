@@ -202,18 +202,12 @@ def scan(
         console.print("[dim]Try: ggtune scan /path/to/your/models[/]")
         return
 
-    table = Table(box=box.SIMPLE, show_header=True)
-    table.add_column("#", style="dim", justify="right")
-    table.add_column("Model", min_width=40)
-    table.add_column("Size", justify="right")
-
     items = sorted(found.items(), key=lambda x: -x[1])
     for i, (fpath, size) in enumerate(items, 1):
         size_gb = size / 1e9
-        table.add_row(str(i), fpath, f"{size_gb:.1f} GB")
+        print(f"  {i:2}.  {size_gb:5.1f} GB  {fpath}")
 
-    console.print(table)
-    console.print(f"[dim]Found {len(found)} models. Run with: ggtune run <path>[/]")
+    print(f"\nFound {len(found)} models. Run with: ggtune run <path>")
 
 
 @app.command()

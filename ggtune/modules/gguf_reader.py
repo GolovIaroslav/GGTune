@@ -83,7 +83,11 @@ def read(model_path: str) -> ModelProfile:
         if f is None:
             return None
         try:
-            return int(f.parts[-1])
+            val = f.parts[-1]
+            # numpy memmap or array
+            if hasattr(val, "flat"):
+                return int(val.flat[0])
+            return int(val)
         except Exception:
             return None
 

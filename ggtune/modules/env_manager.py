@@ -41,6 +41,18 @@ def _find_binary(name: str) -> Optional[Path]:
         p = base / name
         if p.exists():
             return p
+    # try locate on Linux/macOS
+    try:
+        result = subprocess.run(
+            ["locate", "-r", f"/{name}$"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.splitlines():
+            p = Path(line.strip())
+            if p.name == name and p.exists():
+                return p
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
     found = shutil.which(name)
     return Path(found) if found else None
 

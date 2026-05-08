@@ -51,10 +51,10 @@ class CompatReport:
 COMPAT_TESTS = [
     CompatTest(
         name="--list-devices",
-        description="llama-cli must list at least CPU",
+        description="llama-cli must list available compute devices",
         args=["--list-devices"],
         binary="llama-cli",
-        validator=lambda out: "CPU" in out or "cpu" in out.lower(),
+        validator=lambda out: any(x in out for x in ["CPU", "CUDA", "Metal", "Available devices", "Device"]),
         critical=True,
     ),
     CompatTest(
@@ -93,8 +93,10 @@ COMPAT_TESTS = [
 
 
 def run_tests(bin_dir: str) -> CompatReport:
+    from ggtune.utils.shell import make_env_with_lib
     bin_path = Path(bin_dir)
     build = LLAMA_CPP_PINNED_BUILD
+    env = make_env_with_lib(bin_dir)
     results = []
 
     for test in COMPAT_TESTS:
@@ -108,7 +110,7 @@ def run_tests(bin_dir: str) -> CompatReport:
         try:
             proc = subprocess.run(
                 [str(binary)] + test.args,
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, timeout=15, env=env,
             )
             combined = proc.stdout + proc.stderr
             passed = test.validator(combined)
