@@ -25,20 +25,40 @@ HUNGRY_PROCESSES = {
 WARN_UNSAVED = {"chrome", "chromium", "firefox", "code"}
 
 
+def _gpu_pids() -> set:
+    """Get PIDs currently using GPU via nvidia-smi."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return {int(x.strip()) for x in r.stdout.splitlines() if x.strip().isdigit()}
+    except Exception:
+        return set()
+
+
 def _find_hungry() -> List[Tuple[int, str, str, float]]:
-    """Returns list of (pid, name, description, ram_mb)."""
+    """Returns list of (pid, name, description, ram_mb). GPU processes shown first."""
+    gpu_pids = _gpu_pids()
     found = []
     try:
         for proc in psutil.process_iter(["pid", "name", "memory_info"]):
+            pid = proc.info["pid"]
             name = (proc.info["name"] or "").lower()
-            for key, desc in HUNGRY_PROCESSES.items():
-                if key in name:
-                    ram_mb = proc.info["memory_info"].rss / (1024 * 1024) if proc.info["memory_info"] else 0
-                    found.append((proc.info["pid"], proc.info["name"], desc, ram_mb))
-                    break
+            ram_mb = proc.info["memory_info"].rss / (1024 * 1024) if proc.info["memory_info"] else 0
+            if pid in gpu_pids:
+                base = HUNGRY_PROCESSES.get(name.split("/")[-1], proc.info["name"])
+                found.append((pid, proc.info["name"], f"[yellow]GPU {base}[/]", ram_mb))
+            else:
+                for key, desc in HUNGRY_PROCESSES.items():
+                    if key in name:
+                        found.append((pid, proc.info["name"], desc, ram_mb))
+                        break
     except Exception:
         pass
-    return found
+    # GPU processes first
+    return sorted(found, key=lambda x: "GPU" not in x[2])
 
 
 def prompt_and_kill() -> None:

@@ -44,11 +44,11 @@ def run(
     model = gguf_reader.read(model_path)
     console.print(f"  [bold]{model}[/]")
 
-    # Sanity check
-    if model.file_size_gb > hw.ram_available_gb * 0.9:
+    # Sanity check — use total RAM, not available (fluctuates with running processes)
+    if model.file_size_gb > hw.ram_total_gb * 0.85:
         error(
-            f"Model ({model.file_size_gb:.1f}GB) won't fit in RAM "
-            f"({hw.ram_available_gb:.1f}GB available)."
+            f"Model ({model.file_size_gb:.1f}GB) is too large for this system "
+            f"({hw.ram_total_gb:.1f}GB RAM total)."
         )
         raise SystemExit(1)
 

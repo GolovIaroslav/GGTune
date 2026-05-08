@@ -93,8 +93,7 @@ def _build_cmd(
         "-m", model.path,
         "-ngl", "999",
         "-t", str(params.get("threads", 8)),
-        "-pg", f"512,128",
-        "-w", str(BENCH_WARMUP_RUNS),
+        "-pg", "512,128",
         "-r", str(BENCH_MEASUREMENT_RUNS),
         "-o", "csv",
     ]
