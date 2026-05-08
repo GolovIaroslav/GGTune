@@ -464,12 +464,14 @@ def _screen_llama_update() -> None:
     current_build = "not found"
 
     try:
+        console.print("  [dim]Searching for llama.cpp...[/]")
         env = env_manager.detect(hw)
         current_build = env.build
         console.print(f"  Installed:  [bold]{env.build}[/]  ({env.backend.value})")
         console.print(f"  Location:   {env.bin_dir}")
+        console.print(f"  Found via:  [dim]{env.found_via}[/]")
     except RuntimeError:
-        console.print(f"  [yellow]llama.cpp not installed.[/]")
+        console.print(f"  [yellow]llama.cpp not installed or not found.[/]")
 
     console.print()
     console.print("  [dim]Checking latest release...[/]")
@@ -487,7 +489,6 @@ def _screen_llama_update() -> None:
                     f"  [yellow]Latest: {latest}[/]  "
                     f"[dim](you're {diff} build{'s' if diff != 1 else ''} behind)[/]"
                 )
-                # Show only breaking changes, not every cuda tweak
                 changes = check_for_changes(current_build)
                 breaking = [c for c in changes if c.is_breaking]
                 if breaking:
@@ -505,7 +506,8 @@ def _screen_llama_update() -> None:
     console.print()
     menu = "  [bold cyan][1][/]  Install / rebuild llama.cpp"
     if env:
-        menu += f"  [dim](currently {current_build}, will build from source ~10 min)[/]"
+        menu += f"  [dim](currently {current_build}, ~10 min build from source)[/]"
+    menu += "\n  [bold cyan][2][/]  Re-scan  [dim](clear cached path, search again)[/]"
     menu += "\n  [bold cyan][b][/]  Back"
     console.print(Panel(menu, border_style="dim", padding=(1, 4), width=WIDTH))
 
@@ -517,6 +519,14 @@ def _screen_llama_update() -> None:
             console.print("[green]✓ Done![/]")
         except Exception as e:
             console.print(f"[red]Build failed: {e}[/]")
+    elif choice == "2":
+        env_manager.clear_cache()
+        console.print("  [dim]Cache cleared. Searching...[/]")
+        try:
+            env2 = env_manager.detect(hw)
+            console.print(f"  [green]✓ Found:[/] {env2.bin_dir}  [dim](via {env2.found_via})[/]")
+        except RuntimeError as e:
+            console.print(f"  [red]Not found: {e}[/]")
     _ask("\nPress Enter to go back")
 
 
