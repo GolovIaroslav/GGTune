@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ggtune"
+version = "0.1.0"
+description = "Stop guessing llama.cpp parameters. GGTune benchmarks your hardware and finds the fastest settings for any GGUF model."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+dependencies = [
+    "optuna>=3.6",
+    "psutil>=5.9",
+    "pynvml>=11.5",
+    "rich>=13.0",
+    "typer>=0.12",
+    "pydantic>=2.0",
+    "filelock>=3.13",
+    "requests>=2.31",
+    "gguf>=0.10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4", "mypy>=1.10"]
+
+[project.scripts]
+ggtune = "ggtune.cli:app"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
