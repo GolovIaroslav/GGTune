@@ -6,7 +6,7 @@ Finds the fastest llama.cpp parameters for your GPU and model by actually runnin
 $ ggtune
 ```
 
-Interactive TUI guides you through scanning for models, running benchmarks, and saving the result as a shell alias.
+Interactive TUI guides you through scanning for models, running benchmarks, and getting a ready-to-run launch command.
 
 ---
 
@@ -63,9 +63,15 @@ CLI commands also work if you prefer:
 ```bash
 ggtune run /path/to/model.gguf        # full benchmark
 ggtune quick /path/to/model.gguf      # ~5 min quick version
+ggtune browse                          # find models on HuggingFace
+ggtune scan                            # find .gguf files on disk
+ggtune info /path/to/model.gguf       # model metadata
 ggtune hw                              # hardware info
 ggtune show                            # saved profiles
+ggtune clear --all                     # clear profile cache
 ggtune compat                          # test llama.cpp binaries
+ggtune update                          # update llama.cpp
+ggtune help                            # show all commands
 ```
 
 ---
