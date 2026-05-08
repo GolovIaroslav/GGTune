@@ -56,19 +56,22 @@ The official docs tell you what the flags do, not what values to use for **your 
 
 **Requirements:** Python 3.10+, git, cmake, CUDA toolkit (for GPU acceleration)
 
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if you don't have it:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Then:
+
 ```bash
 git clone https://github.com/GolovIaroslav/GGTune
 cd GGTune
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+uv sync
+uv run ggtune hw
 ```
 
-Then run `ggtune` while the venv is active. To reactivate later:
-
-```bash
-source .venv/bin/activate
-```
+`uv sync` handles the virtualenv automatically. Use `uv run ggtune <command>` or activate the shell once with `source .venv/bin/activate`.
 
 llama.cpp is managed automatically. GGTune will build it on first run if it's not found, or if the existing binary doesn't have CUDA support.
 
