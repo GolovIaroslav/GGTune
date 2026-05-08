@@ -21,6 +21,16 @@ def _default(ctx: typer.Context) -> None:
         main_menu()
 
 
+@app.command(name="help")
+def help_cmd(ctx: typer.Context) -> None:
+    """Show this help message."""
+    import click
+    root = ctx
+    while root.parent:
+        root = root.parent
+    click.echo(root.get_help())
+
+
 @app.command()
 def run(
     model: str = typer.Argument(..., help="Path to .gguf model file"),
