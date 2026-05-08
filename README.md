@@ -1,62 +1,33 @@
 # GGTune
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![GitHub stars](https://img.shields.io/github/stars/GolovIaroslav/GGTune?style=social)](https://github.com/GolovIaroslav/GGTune/stargazers)
-
-**Stop guessing llama.cpp parameters.** GGTune benchmarks your actual hardware and finds the fastest settings for any GGUF model automatically.
+Finds the fastest llama.cpp parameters for your GPU and model by actually running benchmarks on your hardware.
 
 ```
-$ ggtune run Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf
-
-Scanning hardware...  RTX 3060 Laptop 6GB · 32GB RAM · 8 cores
-Reading model...      MoE · 128 experts · 35B params · Q2_K_XL
-
-Running benchmark (38 trials, ~22 min)...
-  Quick probe    ████████████████  12/12
-  Optuna TPE     ████████████████  30/30  best so far: 41.2 t/s
-  Context search ████████████████  6/6
-  Stability      ████████████████  3/3
-
-Results
-  Speed:    45.7 t/s  (was 12 t/s with default settings)
-  Context:  40 000 tokens
-  Params:   -ncmoe 30 -t 8 -ctk q8_0 -ctv q8_0 -fa on
-
-Alias written to ~/.zshrc → type 'qwen' to start
+$ ggtune
 ```
+
+Interactive TUI guides you through scanning for models, running benchmarks, and saving the result as a shell alias.
 
 ---
 
-## Why
+## What it does
 
-Running a GGUF model with wrong parameters is painful:
-- Too many threads → slower than half
-- Context too large → crash
-- MoE experts misconfigured → VRAM sits idle
-
-The official docs tell you what the flags do, not what values to use for **your specific GPU and model**. GGTune runs the actual benchmark on your hardware, searches the parameter space intelligently, and hands you a working configuration.
+You give it a GGUF file. It runs `llama-bench` with different combinations of `-ncmoe`, `-ctk`, `-ctv`, `-t`, `-fa` and finds what's fastest on your machine. For MoE models it searches the expert offload range. For dense models it searches GPU layer counts. At the end you get a ready-to-use command with the best settings.
 
 ---
 
-## Features
+## Requirements
 
-- **Automatic llama.cpp setup** — detects if CUDA is missing, explains why, builds from source with the right flags. No manual cmake.
-- **GGUF-aware search** — reads model metadata before benchmarking. MoE models get MoE-specific parameter search, dense models get layer offload search.
-- **Smart optimizer** — quick grid probe to rule out bad regions, then Bayesian search (Optuna TPE) to converge fast. Usually 30–50 benchmark runs total.
-- **Context binary search** — finds the largest context that fits in VRAM without killing generation speed.
-- **Model browser** — searches HuggingFace for models that fit your VRAM, filtered to quantizations that actually make sense for your hardware.
-- **Compatibility guard** — pins a tested llama.cpp version. Before any update, runs smoke tests to catch broken flags or changed output formats.
-- **Cached profiles** — benchmark results are saved per model + hardware fingerprint. Second run on the same model takes seconds.
-- **Ready to use** — writes an alias to your shell config. `qwen` and it opens in the browser.
+- Python 3.10+
+- NVIDIA GPU with CUDA (AMD/Apple planned)
+- Linux or macOS
+- `git`, `cmake`, CUDA toolkit (for building llama.cpp)
 
 ---
 
 ## Install
 
-**Requirements:** Python 3.10+, git, cmake, CUDA toolkit (for GPU acceleration)
-
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if you don't have it:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first if you don't have it:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -68,156 +39,62 @@ Then:
 git clone https://github.com/GolovIaroslav/GGTune
 cd GGTune
 uv sync
-uv run ggtune hw
+uv run ggtune
 ```
 
-`uv sync` handles the virtualenv automatically. Use `uv run ggtune <command>` or activate the shell once with `source .venv/bin/activate`.
-
-llama.cpp is managed automatically. GGTune will build it on first run if it's not found, or if the existing binary doesn't have CUDA support.
+If you already have llama.cpp built somewhere, GGTune will find it automatically. If not, it can build it for you from the TUI (option 6).
 
 ---
 
 ## Usage
 
-**Tune a model you already have:**
-```bash
-ggtune run /path/to/model.gguf
-ggtune run /path/to/model.gguf --alias mymodel
-```
+Just run `ggtune` (or `uv run ggtune` if not activated). The TUI has everything:
 
-**Find and download a model first:**
-```bash
-ggtune browse              # shows models that fit your VRAM
-ggtune browse --vram 6     # filter for 6GB VRAM
-```
+- Scan for models on your machine
+- Enter a model path manually
+- Browse HuggingFace for models that fit your VRAM
+- Run full or quick benchmark
+- View saved results
+- Update llama.cpp
+- Check compatibility
 
-**Quick tune (5 minutes instead of 20):**
-```bash
-ggtune quick /path/to/model.gguf
-```
+CLI commands also work if you prefer:
 
-**Check what's installed:**
 ```bash
-ggtune hw                  # hardware report
-ggtune info model.gguf     # model metadata
-ggtune show                # saved benchmark profiles
-```
-
-**Keep llama.cpp working:**
-```bash
-ggtune compat              # run compatibility tests
-ggtune update --check      # check for relevant llama.cpp changes
-ggtune update              # safe update with automatic rollback
+ggtune run /path/to/model.gguf        # full benchmark
+ggtune quick /path/to/model.gguf      # ~5 min quick version
+ggtune hw                              # hardware info
+ggtune show                            # saved profiles
+ggtune compat                          # test llama.cpp binaries
 ```
 
 ---
 
-## Model Browser
+## Supported models
 
-GGTune can search HuggingFace for models that fit your hardware. It focuses on [Unsloth](https://huggingface.co/unsloth) quantizations because they consistently perform better on consumer GPUs — dynamic quantization keeps quality higher at smaller sizes compared to standard GGUF quants.
-
-```bash
-$ ggtune browse
-
-Models for RTX 3060 6GB + 32GB RAM
-
-  #  Model                              Size   VRAM   Est. speed
-  1  unsloth/Qwen3.6-35B-A3B Q2_K_XL   12 GB  part   ~45 t/s
-  2  unsloth/Qwen3-14B UD-Q4_K_XL       9 GB  ✓      ~55 t/s
-  3  unsloth/Llama-3.1-8B Q8_0          8 GB  ✓      ~70 t/s
-  4  unsloth/gemma-3-12b UD-Q4_K_M      7 GB  ✓      ~60 t/s
-
-[1-4] download   [q] quit
-> 3
-
-Downloading... ████████████████ 8.5 GB
-Run benchmark now? [Y/n]
-```
+Any GGUF format. The main focus is quantized models from [unsloth](https://huggingface.co/unsloth) and [bartowski](https://huggingface.co/bartowski) — the search space is tuned for them. Dense models and MoE models both work.
 
 ---
 
-## How it works
+## How the benchmark works
 
-**Phase 1 — Quick probe.** Runs a coarse grid of 12 parameter combinations to eliminate regions that crash or are clearly slow.
+1. Quick grid probe — tries a coarse set of parameter combinations to eliminate bad regions
+2. Bayesian search — Optuna TPE, warm-started from probe results, ~30 trials
+3. Context search — binary search to find the largest context where speed stays above 60% of peak
+4. Stability check — runs the winner 3× to confirm results are consistent
 
-**Phase 2 — Bayesian search.** Uses Optuna with TPE sampler, warm-started with results from phase 1. Converges to near-optimal in ~30 trials.
-
-**Phase 3 — Context search.** Binary search over context sizes [4k, 8k, 16k, 32k, 40k, 64k, 128k]. Finds the largest context where generation speed stays above 60% of peak.
-
-**Phase 4 — Stability check.** Runs the winner 3 times, reports coefficient of variation. Warns if results are noisy (background processes, thermal throttling).
-
-For MoE models the key parameter is `-ncmoe` — how many experts to keep in RAM. Too few and the model thrashes disk. Too many and you OOM. The search space is built from the model's actual expert counts read from GGUF metadata.
-
----
-
-## llama.cpp compatibility
-
-llama.cpp updates daily and occasionally changes flag names, output formats, or behavior. GGTune handles this by:
-
-- **Pinning a tested build** — you get a specific version that's known to work, not whatever is latest
-- **Smoke tests on install/update** — checks that `llama-bench` outputs parseable CSV, that `-ncmoe` flag exists, that `--list-devices` works
-- **Safe updates** — builds the new version alongside the old one, runs tests, swaps only if everything passes
-- **Rollback** — previous version is kept until you explicitly clean up
-
-To see what changed in llama.cpp since your installed version:
-```bash
-ggtune update --check
-```
-
-This shows only changes that affect GGTune's functionality — benchmark output format, CUDA detection, MoE flags, KV cache flags — not every commit.
-
----
-
-## Supported hardware
-
-| GPU | Status |
-|-----|--------|
-| NVIDIA (CUDA) | ✅ Full support |
-| AMD (ROCm) | 🚧 Planned |
-| Apple Silicon (Metal) | 🚧 Planned |
-| CPU only | ✅ Works, slow |
-
-| OS | Status |
-|----|--------|
-| Linux | ✅ Full support |
-| macOS | ✅ Full support |
-| Windows | 🚧 Planned |
+Results are cached per model + hardware fingerprint. Running it again on the same model is instant.
 
 ---
 
 ## Configuration
 
-GGTune stores everything in `~/.llamatune/`:
+Everything lives in `~/.llamatune/`:
 
 ```
 ~/.llamatune/
-├── env.json          # llama.cpp install info, pinned build
-├── profiles/         # cached benchmark results per model+hardware
-└── llamatune.log     # full log of every benchmark run
-```
-
-To force a fresh benchmark ignoring the cache:
-```bash
-ggtune run model.gguf --force
-```
-
----
-
-## Contributing
-
-The codebase is split into independent modules — hardware scanner, GGUF reader, benchmark engine, HuggingFace browser, compatibility guard. Each module has a clear input/output contract and can be developed and tested in isolation.
-
-The most fragile part is `benchmark_engine.py` — specifically the function that parses `llama-bench` output. If something breaks after a llama.cpp update, that's usually where to look.
-
-```bash
-# Run tests
-pytest tests/
-
-# Run just the benchmark parser tests (fastest feedback loop)
-pytest tests/test_bench_parser.py -v
-
-# Check compatibility with installed llama.cpp
-ggtune compat --report
+├── env.json      # llama.cpp location and build info
+└── profiles/     # cached benchmark results
 ```
 
 ---

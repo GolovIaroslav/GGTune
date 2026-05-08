@@ -1,7 +1,8 @@
 """Module 4: Process Manager — find and kill GPU-hungry processes."""
 import subprocess
+import sys
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import psutil
 from rich.console import Console
@@ -39,6 +40,24 @@ EXE_KEY_MAP = {
 }
 
 WARN_UNSAVED = {"google-chrome", "chromium", "firefox", "code"}
+
+
+def _input_timed(timeout: int = 60) -> Optional[str]:
+    """Read a line from stdin with a timeout. Returns None on timeout."""
+    try:
+        import select as _sel
+        sys.stdout.flush()
+        ready, _, _ = _sel.select([sys.stdin], [], [], timeout)
+        if ready:
+            return sys.stdin.readline().strip().lower()
+        print(f"\n  [auto-skipped after {timeout}s]")
+        return None
+    except Exception:
+        # Windows or unusual environment — fall back to plain input (no timeout)
+        try:
+            return input().strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return None
 
 
 def _gpu_mem_by_pid() -> Dict[int, int]:
@@ -171,11 +190,11 @@ def prompt_and_kill() -> None:
     while remaining:
         console.print(
             f"  Enter the [bold]number[/] of the process to close "
-            f"(1–{len(remaining)}), or [bold]n[/] to stop:"
+            f"(1–{len(remaining)}), [bold]n[/] to skip, or wait 60s to auto-skip:"
         )
-        try:
-            choice = input("> ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        console.print("[bold]> [/]", end="")
+        choice = _input_timed(60)
+        if choice is None:
             break
 
         if choice in ("n", "q", ""):

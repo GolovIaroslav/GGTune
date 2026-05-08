@@ -454,42 +454,60 @@ def _screen_model_and_run(model_path: str) -> None:
 
 def _screen_llama_update() -> None:
     _clear()
-    _banner("llama.cpp — Version & Update")
+    _banner("llama.cpp")
 
     from ggtune.modules import hardware_scanner, env_manager
-    from ggtune.modules.compat_guard import check_for_changes
+    from ggtune.modules.compat_guard import get_latest_build, check_for_changes
 
     hw = hardware_scanner.scan()
+    env = None
+    current_build = "not found"
 
     try:
         env = env_manager.detect(hw)
-        console.print(f"  [bold]Current build:[/]  {env.build}")
-        console.print(f"  [bold]Backend:[/]        {env.backend.value}")
-        console.print(f"  [bold]Binary dir:[/]     {env.bin_dir}")
-        console.print()
+        current_build = env.build
+        console.print(f"  Installed:  [bold]{env.build}[/]  ({env.backend.value})")
+        console.print(f"  Location:   {env.bin_dir}")
+    except RuntimeError:
+        console.print(f"  [yellow]llama.cpp not installed.[/]")
 
-        console.print("[dim]Checking for relevant changes on GitHub...[/]")
-        changes = check_for_changes(env.build)
-        if not changes:
-            console.print("  [green]✓ No impactful changes since your build.[/]")
-        else:
-            console.print(f"  [yellow]{len(changes)} change(s) may affect GGTune:[/]")
-            for c in changes:
-                flag = " [red][BREAKING][/]" if c.is_breaking else ""
-                areas = ", ".join(c.affected_areas[:3])
-                console.print(f"    b{c.build}  {c.title}{flag}  [dim]({areas})[/]")
-        console.print()
+    console.print()
+    console.print("  [dim]Checking latest release...[/]")
+    latest = get_latest_build()
 
-    except RuntimeError as e:
-        console.print(f"  [yellow]llama.cpp not found: {e}[/]\n")
+    if latest and current_build != "not found":
+        try:
+            cur_num = int(current_build.lstrip("b"))
+            lat_num = int(latest.lstrip("b"))
+            diff = lat_num - cur_num
+            if diff <= 0:
+                console.print(f"  [green]✓ Up to date[/] ({current_build})")
+            else:
+                console.print(
+                    f"  [yellow]Latest: {latest}[/]  "
+                    f"[dim](you're {diff} build{'s' if diff != 1 else ''} behind)[/]"
+                )
+                # Show only breaking changes, not every cuda tweak
+                changes = check_for_changes(current_build)
+                breaking = [c for c in changes if c.is_breaking]
+                if breaking:
+                    console.print(f"\n  [red]⚠ {len(breaking)} breaking change(s):[/]")
+                    for c in breaking[:5]:
+                        console.print(f"    b{c.build}  {c.title}")
+        except ValueError:
+            if latest:
+                console.print(f"  Latest: {latest}")
+    elif latest:
+        console.print(f"  Latest available: [bold]{latest}[/]")
+    else:
+        console.print("  [dim]Could not reach GitHub.[/]")
 
-    console.print(Panel(
-        "  [bold cyan][1][/]  Install / rebuild llama.cpp  [dim](auto-detects GPU backend)[/]\n"
-        "  [bold cyan][b][/]  Back",
-        border_style="dim",
-        padding=(1, 4),
-        width=WIDTH,
-    ))
+    console.print()
+    menu = "  [bold cyan][1][/]  Install / rebuild llama.cpp"
+    if env:
+        menu += f"  [dim](currently {current_build}, will build from source ~10 min)[/]"
+    menu += "\n  [bold cyan][b][/]  Back"
+    console.print(Panel(menu, border_style="dim", padding=(1, 4), width=WIDTH))
 
     choice = _ask("Choice: ")
     if choice == "1":

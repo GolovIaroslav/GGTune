@@ -161,6 +161,22 @@ class Change:
     is_breaking: bool
 
 
+def get_latest_build() -> Optional[str]:
+    """Return the tag of the latest llama.cpp release, e.g. 'b9070'."""
+    try:
+        resp = requests.get(
+            "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
+            timeout=8,
+        )
+        if resp.status_code == 200:
+            tag = resp.json().get("tag_name", "")
+            if tag.startswith("b") and tag[1:].isdigit():
+                return tag
+    except Exception:
+        pass
+    return None
+
+
 def check_for_changes(current_build: str) -> List[Change]:
     try:
         current = int(current_build.lstrip("b"))
