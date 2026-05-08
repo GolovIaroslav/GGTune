@@ -19,10 +19,13 @@ def _clear() -> None:
     os.system("cls" if platform.system() == "Windows" else "clear")
 
 
-def _ask(prompt: str = "> ") -> str:
+def _ask(prompt: str = "") -> str:
     try:
-        from rich.markup import escape as _esc
-        console.print(f"[bold cyan]{_esc(prompt)}[/]", end="")
+        if prompt:
+            from rich.markup import escape as _esc
+            import sys
+            sys.stdout.write(f"\033[1;36m{_esc(prompt)}\033[0m")
+            sys.stdout.flush()
         return input().strip()
     except (EOFError, KeyboardInterrupt):
         return "q"
@@ -884,27 +887,24 @@ def _screen_llama_update() -> None:
         # Rollback info
         prev = env_manager.get_previous()
 
-        # Menu
+        # Compact hint line (models-screen style)
         can_dl = env_manager.prebuilt_available()
-        lines = []
+        hints = []
         if installs:
-            lines.append(f"  [bold cyan][1–{len(installs)}][/]  Activate this installation")
-        lines.append("  [bold cyan][a][/]  Enter path manually")
-        if can_dl and latest:
-            lines.append(f"  [bold cyan][d][/]  Download latest {latest}  [dim](pre-built, fast)[/]")
-        elif latest:
-            lines.append(f"  [bold cyan][d][/]  Download {latest}  [dim](pre-built — Linux CUDA: not available, use [b]i[/b])[/]")
-        lines.append(
-            f"  [bold cyan][i][/]  Build {LLAMA_CPP_PINNED_BUILD} from source  "
-            f"[dim](~10 min, tested stable)[/]"
-        )
+            hints.append("[bold]number[/bold] — activate")
+        hints.append("[bold]a[/bold] — add path")
+        dl_label = f"[bold]d[/bold] — download {latest}" if latest else "[bold]d[/bold] — download"
+        if not can_dl:
+            dl_label += " [dim](Win/Mac only)[/dim]"
+        hints.append(dl_label)
+        hints.append(f"[bold]i[/bold] — build {LLAMA_CPP_PINNED_BUILD}")
         if prev:
-            lines.append(f"  [bold cyan][r][/]  Rollback to [dim]{prev[1]}[/]")
-        lines.append("  [bold cyan][s][/]  Deep scan  [dim](find on all drives / everywhere)[/]")
-        lines.append("  [bold cyan][b][/]  Back")
-        console.print(Panel("\n".join(lines), border_style="dim", padding=(1, 2), width=WIDTH))
+            hints.append(f"[bold]r[/bold] — rollback to {prev[1]}")
+        hints.append("[bold]s[/bold] — deep scan")
+        hints.append("[bold]b[/bold] — back")
+        console.print("\n  [dim]" + "  ".join(hints) + "[/dim]")
 
-        choice = _ask("Choice: ").strip().lower()
+        choice = _ask("").strip().lower()
 
         if choice in ("b", ""):
             return
