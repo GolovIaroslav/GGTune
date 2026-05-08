@@ -70,7 +70,7 @@ def _fetch_models(author: str, limit: int = 30) -> list:
 
 def _fetch_files(model_id: str) -> list:
     try:
-        resp = requests.get(f"{HF_API}/models/{model_id}", timeout=10)
+        resp = requests.get(f"{HF_API}/models/{model_id}", params={"blobs": "true"}, timeout=10)
         if resp.status_code == 200:
             return resp.json().get("siblings", [])
     except Exception:
@@ -95,12 +95,15 @@ def recommend(hw: HardwareProfile, author: str = "unsloth", vram_gb: Optional[fl
             fname = f.get("rfilename", "")
             if not fname.endswith(".gguf") or "mmproj" in fname.lower():
                 continue
+            # skip multi-part shards (e.g. -00001-of-00005.gguf)
+            if re.search(r"-\d{5}-of-\d{5}\.gguf$", fname):
+                continue
 
-            size_bytes = f.get("size", 0)
-            size_gb = size_bytes / 1e9
+            size_bytes = f.get("size") or f.get("lfs", {}).get("size", 0)
+            size_gb = (size_bytes or 0) / 1e9
             if size_gb == 0:
                 continue
-            if size_gb > hw.ram_available_gb * 0.85:
+            if size_gb > hw.ram_total_gb * 0.85:
                 continue
 
             quant = extract_quantization(fname)
