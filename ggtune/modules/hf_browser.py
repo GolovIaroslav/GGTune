@@ -3,7 +3,7 @@ import re
 import subprocess
 import shutil
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import requests
 from rich.console import Console
@@ -19,13 +19,12 @@ console = Console()
 
 QUANT_PRIORITY = {
     "Q8_0": 10, "Q6_K": 9,
-    "Q5_K": 8, "Q5_K_M": 8, "Q5_K_S": 8,
-    "Q4_K": 7, "Q4_K_M": 7, "Q4_K_S": 7,
+    "Q5_K_M": 8, "Q5_K_S": 8, "Q5_K": 8,
+    "Q4_K_M": 7, "Q4_K_S": 7, "Q4_K": 7, "IQ4_XS": 7,
     "Q4_0": 6,
-    "Q3_K": 5, "Q3_K_M": 5,
-    "Q2_K": 4, "Q2_K_XL": 4,
-    "IQ4_XS": 7, "IQ3_XXS": 5, "IQ2_XXS": 3,
-    "UD-Q4_K_XL": 8, "UD-Q2_K": 4,
+    "Q3_K_M": 5, "Q3_K": 5, "IQ3_XXS": 5,
+    "Q2_K_XL": 4, "Q2_K": 4, "UD-Q2_K": 4, "IQ2_XXS": 3,
+    "UD-Q4_K_XL": 8, "UD-Q5_K_XL": 9,
 }
 
 
@@ -34,9 +33,9 @@ def extract_quantization(filename: str) -> str:
         r"UD-Q\d+_K(?:_[A-Z]+)?",
         r"Q\d+_K(?:_[A-Z]+)?",
         r"Q\d+_\d+",
-        r"Q\d+[A-Z]",
         r"IQ\d+_[A-Z]+",
-        r"F16", r"F32", r"BF16",
+        r"Q\d+[A-Z]",
+        r"BF16", r"F16", r"F32",
     ]
     name = filename.upper()
     for pat in patterns:
@@ -46,14 +45,50 @@ def extract_quantization(filename: str) -> str:
     return "unknown"
 
 
-def _quant_score(quant: str, size_gb: float, vram_gb: float, fits_vram: bool) -> float:
+def _parse_moe_info(model_id: str, tags: list) -> Tuple[bool, float]:
+    """
+    Returns (is_moe, active_fraction).
+    active_fraction = active_params / total_params, used to estimate min VRAM.
+
+    Examples: "35B-A3B" → 3/35 ≈ 0.086
+              "671B-A37B" → 37/671 ≈ 0.055
+              "22B-A3B" → 3/22 ≈ 0.136
+    """
+    name = model_id.upper()
+    tag_set = {t.lower() for t in tags}
+
+    m = re.search(r'(\d+(?:\.\d+)?)B-A(\d+(?:\.\d+)?)B', name)
+    if m:
+        total = float(m.group(1))
+        active = float(m.group(2))
+        return True, active / total
+
+    is_moe = "moe" in tag_set or "mixture-of-experts" in tag_set
+    # MoE but can't determine ratio — assume 25% active (conservative)
+    return is_moe, 0.25
+
+
+def _min_vram_gb(size_gb: float, active_fraction: float) -> float:
+    """
+    Estimate minimum VRAM needed with ncmoe = n_experts_used.
+
+    MoE model structure:
+      ~30% non-expert weights (attention, norms) → always in VRAM
+      ~70% expert weights → only active fraction in VRAM with ncmoe
+
+    Formula: size * (0.30 + 0.70 * active_fraction) * 1.15 overhead
+    """
+    return size_gb * (0.30 + 0.70 * active_fraction) * 1.15
+
+
+def _score(quant: str, size_gb: float, vram_gb: float, fits_vram: bool, fits_ncmoe: bool) -> float:
     priority = QUANT_PRIORITY.get(quant, 5)
-    vram_bonus = 2.0 if fits_vram else 0.0
-    size_penalty = max(0, size_gb - vram_gb) * 0.1
+    vram_bonus = 2.0 if fits_vram else (1.0 if fits_ncmoe else 0.0)
+    size_penalty = max(0, size_gb - vram_gb) * 0.05
     return priority + vram_bonus - size_penalty
 
 
-def _fetch_models(author: str, limit: int = 30) -> list:
+def _fetch_models(author: str, limit: int = 50) -> list:
     try:
         resp = requests.get(
             f"{HF_API}/models",
@@ -79,7 +114,8 @@ def _fetch_files(model_id: str) -> list:
 
 
 def recommend(hw: HardwareProfile, author: str = "unsloth", vram_gb: Optional[float] = None) -> List[ModelRecommendation]:
-    vram = vram_gb or hw.vram_free_mb / 1024
+    # use total VRAM for browse — free VRAM changes constantly and misleads filtering
+    vram = vram_gb or hw.vram_total_mb / 1024
 
     models = _fetch_models(author)
     if not models:
@@ -89,13 +125,15 @@ def recommend(hw: HardwareProfile, author: str = "unsloth", vram_gb: Optional[fl
 
     for model in models:
         model_id = model.get("modelId") or model.get("id", "")
+        tags = model.get("tags", [])
+        is_moe, active_fraction = _parse_moe_info(model_id, tags)
+
         files = _fetch_files(model_id)
 
         for f in files:
             fname = f.get("rfilename", "")
             if not fname.endswith(".gguf") or "mmproj" in fname.lower():
                 continue
-            # skip multi-part shards (e.g. -00001-of-00005.gguf)
             if re.search(r"-\d{5}-of-\d{5}\.gguf$", fname):
                 continue
 
@@ -108,7 +146,17 @@ def recommend(hw: HardwareProfile, author: str = "unsloth", vram_gb: Optional[fl
 
             quant = extract_quantization(fname)
             fits_vram = size_gb < vram * 0.9
-            score = _quant_score(quant, size_gb, vram, fits_vram)
+
+            if is_moe:
+                min_vram = _min_vram_gb(size_gb, active_fraction)
+                fits_ncmoe = (not fits_vram) and min_vram < vram * 0.9
+            else:
+                min_vram = size_gb
+                fits_ncmoe = False
+
+            # skip models that won't fit even with ncmoe
+            if not fits_vram and not fits_ncmoe:
+                continue
 
             recommendations.append(ModelRecommendation(
                 model_id=model_id,
@@ -116,36 +164,58 @@ def recommend(hw: HardwareProfile, author: str = "unsloth", vram_gb: Optional[fl
                 size_gb=size_gb,
                 quantization=quant,
                 fits_vram=fits_vram,
-                score=score,
+                fits_vram_ncmoe=fits_ncmoe,
+                min_vram_gb=min_vram,
+                is_moe=is_moe,
+                score=_score(quant, size_gb, vram, fits_vram, fits_ncmoe),
                 hf_url=f"https://huggingface.co/{model_id}/blob/main/{fname}",
                 download_cmd=f"huggingface-cli download {model_id} {fname}",
             ))
 
-    return sorted(recommendations, key=lambda x: x.score, reverse=True)[:10]
+    full_fit = sorted([r for r in recommendations if r.fits_vram], key=lambda x: x.score, reverse=True)[:5]
+    ncmoe_fit = sorted([r for r in recommendations if r.fits_vram_ncmoe], key=lambda x: x.score, reverse=True)[:5]
+    return full_fit + ncmoe_fit
 
 
 def print_table(recs: List[ModelRecommendation], hw: HardwareProfile) -> None:
-    table = Table(
-        title=f"Models for {hw.gpu_name} {hw.vram_total_mb // 1024}GB + {hw.ram_total_gb:.0f}GB RAM",
-        box=box.ROUNDED,
-    )
-    table.add_column("#", style="dim", justify="right")
-    table.add_column("Model", min_width=35)
-    table.add_column("Size", justify="right")
-    table.add_column("VRAM", justify="center")
-    table.add_column("Quant")
+    title = f"Models for {hw.gpu_name} {hw.vram_total_mb // 1024}GB + {hw.ram_total_gb:.0f}GB RAM"
 
-    for i, r in enumerate(recs, 1):
-        vram_sym = "[green]✓[/]" if r.fits_vram else "[yellow]part[/]"
-        table.add_row(
-            str(i),
-            f"{r.model_id}  [dim]{r.filename[:30]}[/]",
-            f"{r.size_gb:.1f} GB",
-            vram_sym,
-            r.quantization,
-        )
+    full = [r for r in recs if r.fits_vram]
+    ncmoe = [r for r in recs if r.fits_vram_ncmoe]
+
+    def _make_table() -> Table:
+        t = Table(title=title, box=box.ROUNDED, show_header=True)
+        t.add_column("#", style="dim", justify="right")
+        t.add_column("Model", min_width=28)
+        t.add_column("File", min_width=22)
+        t.add_column("Size", justify="right")
+        t.add_column("VRAM", justify="center")
+        t.add_column("Quant")
+        return t
+
+    table = _make_table()
+    idx = 1
+
+    if full:
+        table.add_section()
+        for r in full:
+            table.add_row(str(idx), r.model_id, r.filename, f"{r.size_gb:.1f} GB",
+                          "[green]✓ full[/]", r.quantization)
+            idx += 1
+
+    if ncmoe:
+        table.add_section()
+        for r in ncmoe:
+            table.add_row(str(idx), f"{r.model_id} [dim](MoE)[/]", r.filename,
+                          f"{r.size_gb:.1f} GB",
+                          f"[yellow]ncmoe ~{r.min_vram_gb:.1f}GB[/]", r.quantization)
+            idx += 1
 
     console.print(table)
+    console.print(
+        "[dim]✓ full = fits in VRAM entirely  "
+        "| [yellow]ncmoe[/dim] [dim]= 35B+ MoE model, only active experts in VRAM (~8x speedup vs CPU)[/]\n"
+    )
 
 
 def download(rec: ModelRecommendation, dest_dir: Path) -> Path:
@@ -166,9 +236,7 @@ def download(rec: ModelRecommendation, dest_dir: Path) -> Path:
 
 
 def _download_with_progress(url: str, dest: Path) -> None:
-    import requests as req
-
-    with req.get(url, stream=True, timeout=30) as resp:
+    with requests.get(url, stream=True, timeout=30) as resp:
         resp.raise_for_status()
         total = int(resp.headers.get("content-length", 0))
         with Progress(
@@ -191,7 +259,7 @@ def interactive_browse(hw: HardwareProfile, author: str = "unsloth", vram_gb: Op
         return None
 
     print_table(recs, hw)
-    console.print("\n[dim]Enter number to download, or [q] to quit[/]")
+    console.print("[dim]Enter number to download, or [q] to quit[/]")
 
     choice = input("> ").strip().lower()
     if choice == "q" or not choice:
