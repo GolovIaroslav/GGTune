@@ -57,15 +57,17 @@ The official docs tell you what the flags do, not what values to use for **your 
 **Requirements:** Python 3.10+, git, cmake, CUDA toolkit (for GPU acceleration)
 
 ```bash
-pip install ggtune
-```
-
-Or from source:
-
-```bash
 git clone https://github.com/GolovIaroslav/GGTune
 cd GGTune
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
+```
+
+Then run `ggtune` while the venv is active. To reactivate later:
+
+```bash
+source .venv/bin/activate
 ```
 
 llama.cpp is managed automatically. GGTune will build it on first run if it's not found, or if the existing binary doesn't have CUDA support.
