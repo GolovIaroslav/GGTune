@@ -11,7 +11,7 @@ from rich.table import Table
 from rich import box
 from rich.progress import Progress, DownloadColumn, TransferSpeedColumn, BarColumn, TextColumn
 
-from ggtune.config import HF_API, RECOMMENDED_AUTHORS
+from ggtune.config import HF_API, RECOMMENDED_AUTHORS, MODELS_DIR
 from ggtune.models.hardware import HardwareProfile
 from ggtune.models.hf_model import ModelRecommendation
 
@@ -240,7 +240,8 @@ def print_table(recs: List[ModelRecommendation], hw: HardwareProfile) -> None:
     )
 
 
-def download(rec: ModelRecommendation, dest_dir: Path) -> Path:
+def download(rec: ModelRecommendation, dest_dir: Optional[Path] = None) -> Path:
+    dest_dir = dest_dir or MODELS_DIR
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / rec.filename
 
@@ -254,6 +255,56 @@ def download(rec: ModelRecommendation, dest_dir: Path) -> Path:
         url = f"https://huggingface.co/{rec.model_id}/resolve/main/{rec.filename}"
         _download_with_progress(url, dest)
 
+    from ggtune.modules.model_tracker import register
+    register(dest, rec.model_id)
+    return dest
+
+
+def parse_model_input(text: str) -> Optional[str]:
+    """Parse 'author/model' or HF URL → model_id, or None if invalid."""
+    text = text.strip()
+    if text.startswith("https://huggingface.co/"):
+        parts = text.removeprefix("https://huggingface.co/").split("/")
+        if len(parts) >= 2:
+            return f"{parts[0]}/{parts[1]}"
+        return None
+    if "/" in text and len(text.split("/")) == 2:
+        a, m = text.split("/", 1)
+        if a and m:
+            return text
+    return None
+
+
+def fetch_gguf_files(model_id: str) -> List[dict]:
+    """Return list of {filename, size_gb} for all GGUF files in a model repo."""
+    files = _fetch_files(model_id)
+    result = []
+    for f in files:
+        fname = f.get("rfilename", "")
+        if not fname.lower().endswith(".gguf"):
+            continue
+        size_bytes = f.get("size") or 0
+        result.append({"filename": fname, "size_gb": size_bytes / 1e9})
+    return result
+
+
+def download_by_id(model_id: str, filename: str) -> Path:
+    """Download a specific file from a model repo to MODELS_DIR."""
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    dest = MODELS_DIR / filename
+
+    if shutil.which("huggingface-cli"):
+        subprocess.run(
+            ["huggingface-cli", "download", model_id, filename,
+             "--local-dir", str(MODELS_DIR)],
+            check=True,
+        )
+    else:
+        url = f"https://huggingface.co/{model_id}/resolve/main/{filename}"
+        _download_with_progress(url, dest)
+
+    from ggtune.modules.model_tracker import register
+    register(dest, model_id)
     return dest
 
 
@@ -281,10 +332,10 @@ def interactive_browse(hw: HardwareProfile, author: str = "unsloth", vram_gb: Op
         return None
 
     print_table(recs, hw)
-    console.print("[dim]Enter number to download, or [q] to quit[/]")
+    console.print("[dim]Enter number to download, or [b] to go back[/]")
 
     choice = input("> ").strip().lower()
-    if choice == "q" or not choice:
+    if choice in ("b", "q", ""):
         return None
 
     try:
@@ -294,7 +345,6 @@ def interactive_browse(hw: HardwareProfile, author: str = "unsloth", vram_gb: Op
         console.print("[red]Invalid choice.[/]")
         return None
 
-    dest_dir = Path.home() / "models"
-    dest = download(rec, dest_dir)
+    dest = download(rec)
     console.print(f"[green]✓ Downloaded to {dest}[/]")
     return dest

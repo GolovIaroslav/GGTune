@@ -5,6 +5,8 @@ LLAMA_CPP_REPO = "https://github.com/ggml-org/llama.cpp"
 
 CONFIG_DIR = Path.home() / ".llamatune"
 PROFILES_DIR = CONFIG_DIR / "profiles"
+MODELS_DIR = CONFIG_DIR / "models"
+MODELS_INDEX = CONFIG_DIR / "models.json"
 ENV_FILE = CONFIG_DIR / "env.json"
 LOG_FILE = CONFIG_DIR / "llamatune.log"
 

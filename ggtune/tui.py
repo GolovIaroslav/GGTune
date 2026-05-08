@@ -183,6 +183,55 @@ def _maybe_run_setup() -> None:
         _screen_setup(hw)
 
 
+# ── Screen 9: Model manager ───────────────────────────────────────────────
+
+def _screen_model_manager() -> None:
+    from ggtune.modules import model_tracker
+    while True:
+        _clear()
+        _banner("Model Manager")
+
+        models = model_tracker.list_all()
+        if not models:
+            console.print("  [dim]No downloaded models tracked yet.[/]")
+            console.print(f"  [dim]Models are saved to ~/.llamatune/models/[/]")
+            _ask("\nPress Enter to go back")
+            return
+
+        table = Table(box=box.ROUNDED, header_style="bold", width=WIDTH)
+        table.add_column("#", style="dim", justify="right")
+        table.add_column("File")
+        table.add_column("Size", justify="right")
+        table.add_column("Downloaded", style="dim")
+        table.add_column("Source", style="dim")
+        for i, m in enumerate(models, 1):
+            table.add_row(
+                str(i), m.filename,
+                f"{m.size_gb:.1f} GB",
+                m.downloaded_at,
+                m.source,
+            )
+        console.print(table)
+
+        choice = _ask("\nNumber to delete, or [b] to go back: ")
+        if choice.lower() in ("b", ""):
+            return
+
+        try:
+            idx = int(choice) - 1
+            target = models[idx]
+        except (ValueError, IndexError):
+            console.print("[red]Invalid choice.[/]")
+            _ask("Press Enter to continue")
+            continue
+
+        confirm = _ask(f"Delete {target.filename}? [y/N]: ")
+        if confirm.lower() == "y":
+            model_tracker.remove(target.path)
+            console.print(f"[green]✓ Deleted {target.filename}[/]")
+            _ask("Press Enter to continue")
+
+
 # ── Main menu ──────────────────────────────────────────────────────────────
 
 def main_menu() -> None:
@@ -211,6 +260,7 @@ def main_menu() -> None:
             "  [bold cyan][6][/]  llama.cpp — version / update\n"
             "  [bold cyan][7][/]  Compatibility test\n"
             "  [bold cyan][8][/]  Clear all profiles\n"
+            "  [bold cyan][9][/]  Model manager\n"
             "  [bold cyan][q][/]  Exit",
             title="[bold]What do you want to do?[/]",
             border_style="cyan",
@@ -242,6 +292,8 @@ def main_menu() -> None:
             _screen_compat()
         elif choice == "8":
             _screen_clear_profiles()
+        elif choice == "9":
+            _screen_model_manager()
         elif choice.lower() in ("q", "quit", "exit", ""):
             _clear()
             console.print("[dim]Bye![/]")
@@ -430,26 +482,106 @@ def _screen_manual_path() -> Optional[str]:
 
 # ── Screen 3: HuggingFace browse ──────────────────────────────────────────
 
+_HF_SEARCH_URL = "https://huggingface.co/models?filter=gguf&sort=downloads"
+
+_MANUAL_GUIDE = (
+    "Enter a model ID or HuggingFace URL:\n\n"
+    "  [bold]unsloth/Llama-3.3-70B-Instruct-GGUF[/]\n"
+    "  [bold]https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF[/]\n\n"
+    f"  Browse all GGUF models: [cyan]{_HF_SEARCH_URL}[/]"
+)
+
+
+def _screen_browse_manual() -> Optional[str]:
+    from ggtune.modules import hf_browser
+    while True:
+        _clear()
+        _banner("Download by Model ID")
+        console.print(Panel(_MANUAL_GUIDE, border_style="dim", padding=(1, 2), width=WIDTH))
+        raw = _ask("\nModel ID / URL (or [b] to go back): ")
+        if raw.lower() in ("b", ""):
+            return None
+
+        model_id = hf_browser.parse_model_input(raw)
+        if not model_id:
+            console.print("[red]Not a valid model ID or URL. Try: author/model-name[/]")
+            _ask("Press Enter to try again")
+            continue
+
+        console.print(f"[dim]Fetching file list for {model_id}...[/]")
+        files = hf_browser.fetch_gguf_files(model_id)
+        if not files:
+            console.print(f"[red]No GGUF files found in {model_id}. Check the model ID.[/]")
+            _ask("Press Enter to try again")
+            continue
+
+        _clear()
+        _banner(model_id)
+        table = Table(box=box.ROUNDED, header_style="bold", width=WIDTH)
+        table.add_column("#", style="dim", justify="right")
+        table.add_column("File")
+        table.add_column("Size", justify="right")
+        for i, f in enumerate(files, 1):
+            table.add_row(str(i), f["filename"], f"{f['size_gb']:.1f} GB")
+        console.print(table)
+
+        choice = _ask("Number to download (or [b] to go back): ")
+        if choice.lower() in ("b", ""):
+            continue
+        try:
+            idx = int(choice) - 1
+            chosen = files[idx]
+        except (ValueError, IndexError):
+            console.print("[red]Invalid choice.[/]")
+            _ask("Press Enter to try again")
+            continue
+
+        console.print(f"[dim]Downloading {chosen['filename']}...[/]")
+        try:
+            dest = hf_browser.download_by_id(model_id, chosen["filename"])
+            console.print(f"[green]✓ Saved to {dest}[/]")
+            _ask("\nPress Enter to continue")
+            return str(dest)
+        except Exception as e:
+            console.print(f"[red]Download failed: {e}[/]")
+            _ask("Press Enter to go back")
+            return None
+
+
 def _screen_browse_hf() -> Optional[str]:
     _clear()
     _banner("Browse HuggingFace")
 
-    author = _ask("Author to browse (default: unsloth): ") or "unsloth"
-    if author.lower() == "b":
+    console.print(Panel(
+        f"  [bold cyan][1][/]  Popular models (unsloth, filtered by your VRAM)\n"
+        f"  [bold cyan][2][/]  Enter model ID or URL manually\n"
+        f"  [bold cyan][b][/]  Back\n\n"
+        f"  [dim]All GGUF models: [cyan]{_HF_SEARCH_URL}[/dim]",
+        title="[bold]Get a Model[/]",
+        border_style="dim",
+        padding=(1, 4),
+        width=WIDTH,
+    ))
+
+    choice = _ask("Choice: ")
+    if choice.lower() in ("b", ""):
         return None
 
-    _clear()
-    _banner(f"HuggingFace — {author}")
+    if choice == "1":
+        try:
+            from ggtune.modules import hardware_scanner, hf_browser
+            hw = hardware_scanner.scan()
+            path = hf_browser.interactive_browse(hw)
+            return str(path) if path else None
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/]")
+            _ask("\nPress Enter to go back")
+            return None
 
-    try:
-        from ggtune.modules import hardware_scanner, hf_browser
-        hw = hardware_scanner.scan()
-        path = hf_browser.interactive_browse(hw, author=author)
-        return str(path) if path else None
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/]")
-        _ask("\nPress Enter to go back")
-        return None
+    if choice == "2":
+        return _screen_browse_manual()
+
+    return None
 
 
 # ── Screen 4: Saved profiles ──────────────────────────────────────────────
