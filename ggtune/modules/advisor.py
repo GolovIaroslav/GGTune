@@ -9,6 +9,8 @@ from rich.table import Table
 from rich import box
 from rich.prompt import Confirm
 
+from typing import Optional
+
 from ggtune.models.hardware import HardwareProfile, Backend
 from ggtune.models.model_profile import ModelProfile
 from ggtune.models.profile import StoredProfile
@@ -69,11 +71,23 @@ def generate_alias_cmd(
     return f"alias {alias_name}='{cmd} & sleep 3 && xdg-open http://localhost:8080'"
 
 
+def _rc_file(shell: str) -> Optional[Path]:
+    if shell == "zsh":
+        return Path.home() / ".zshrc"
+    if shell == "bash":
+        return Path.home() / ".bashrc"
+    if shell == "fish":
+        return Path.home() / ".config" / "fish" / "config.fish"
+    return None  # Windows / unknown
+
+
 def _write_alias(alias_line: str, shell: str, model_name: str) -> bool:
-    rc_map = {"zsh": "~/.zshrc", "bash": "~/.bashrc"}
-    rc_file = Path(os.path.expanduser(rc_map.get(shell, "~/.bashrc")))
+    rc = _rc_file(shell)
+    if rc is None:
+        return False
     try:
-        with rc_file.open("a") as f:
+        rc.parent.mkdir(parents=True, exist_ok=True)
+        with rc.open("a") as f:
             f.write(f"\n# GGTune — {model_name} — {datetime.now().date()}\n")
             f.write(alias_line + "\n")
         return True
@@ -135,13 +149,18 @@ def print_report(
 
     console.print(Panel("\n".join(lines), title="GGTune Results", border_style="cyan"))
 
-    if Confirm.ask(f"\nWrite alias '{alias_name}' to ~/{'.zshrc' if hw.shell == 'zsh' else '.bashrc'}?"):
-        ok = _write_alias(alias_line, hw.shell, model.name)
-        if ok:
-            console.print(f"[green]✓ Alias written. Type '[bold]{alias_name}[/]' to start.[/]")
-        else:
-            console.print("[red]Could not write alias. Add manually:[/]")
-            console.print(alias_line)
+    rc = _rc_file(hw.shell)
+    if rc is not None:
+        if Confirm.ask(f"\nWrite alias '{alias_name}' to {rc}?"):
+            ok = _write_alias(alias_line, hw.shell, model.name)
+            if ok:
+                console.print(f"[green]✓ Alias written. Restart shell or run: source {rc}[/]")
+            else:
+                console.print("[red]Could not write alias. Add manually:[/]")
+                console.print(alias_line)
+    else:
+        console.print("\n[yellow]Windows detected — add this to your PowerShell profile manually:[/]")
+        console.print(alias_line)
 
     return bottleneck
 

@@ -1,4 +1,6 @@
 """Orchestrator — ties all modules together for the 'run' flow."""
+import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -18,6 +20,57 @@ from ggtune.modules import (
 from ggtune.utils.formatting import info, warn, error
 
 console = Console()
+
+
+class _ThermalWatcher:
+    """Polls CPU/GPU temperatures in background during benchmark."""
+
+    def __init__(self) -> None:
+        self.max_cpu: float = 0.0
+        self.max_gpu: float = 0.0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._poll, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=3)
+
+    def _poll(self) -> None:
+        import psutil
+        while not self._stop.is_set():
+            try:
+                for entries in psutil.sensors_temperatures().values():
+                    for e in entries:
+                        if e.current:
+                            self.max_cpu = max(self.max_cpu, e.current)
+            except Exception:
+                pass
+            try:
+                r = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=temperature.gpu",
+                     "--format=csv,noheader"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                for line in r.stdout.splitlines():
+                    line = line.strip()
+                    if line.isdigit():
+                        self.max_gpu = max(self.max_gpu, float(line))
+            except Exception:
+                pass
+            self._stop.wait(5)
+
+    def report(self) -> None:
+        if self.max_cpu > 90:
+            warn(f"CPU peaked at {self.max_cpu:.0f}°C during benchmark — possible throttling")
+        elif self.max_cpu > 0:
+            console.print(f"  [dim]CPU peak temp: {self.max_cpu:.0f}°C[/]")
+        if self.max_gpu > 85:
+            warn(f"GPU peaked at {self.max_gpu:.0f}°C during benchmark — possible throttling")
+        elif self.max_gpu > 0:
+            console.print(f"  [dim]GPU peak temp: {self.max_gpu:.0f}°C[/]")
 
 
 def run(
@@ -90,27 +143,33 @@ def run(
     total_est = quick_runs + OPTUNA_TRIALS + ctx_runs + STABILITY_RUNS
     console.print(f"  ~{total_est} benchmark runs")
 
-    # Benchmark
+    # Benchmark + thermal monitoring
+    thermal = _ThermalWatcher()
+    thermal.start()
     t0 = time.time()
-    if quick:
-        info("Quick mode: probe + Optuna only (no context search)")
-        probe = benchmark_engine.quick_probe(env_cfg, model, space)
-        best_params, peak_tg = benchmark_engine.optuna_search(env_cfg, model, space, probe)
-        mean_tg, std_tg, cv = benchmark_engine.stability_pass(env_cfg, model, best_params, 8192)
-        result = {
-            "best_params": best_params,
-            "tg_tokens_per_sec": mean_tg,
-            "tg_std": std_tg,
-            "stability_cv": cv,
-            "optimal_ctx": 8192,
-            "optuna_best": peak_tg,
-            "optuna_trials": OPTUNA_TRIALS,
-        }
-    else:
-        result = benchmark_engine.run_full(env_cfg, model, space)
-        result["optuna_trials"] = OPTUNA_TRIALS
+    try:
+        if quick:
+            info("Quick mode: probe + Optuna only (no context search)")
+            probe = benchmark_engine.quick_probe(env_cfg, model, space)
+            best_params, peak_tg = benchmark_engine.optuna_search(env_cfg, model, space, probe)
+            mean_tg, std_tg, cv = benchmark_engine.stability_pass(env_cfg, model, best_params, 8192)
+            result = {
+                "best_params": best_params,
+                "tg_tokens_per_sec": mean_tg,
+                "tg_std": std_tg,
+                "stability_cv": cv,
+                "optimal_ctx": 8192,
+                "optuna_best": peak_tg,
+                "optuna_trials": OPTUNA_TRIALS,
+            }
+        else:
+            result = benchmark_engine.run_full(env_cfg, model, space)
+            result["optuna_trials"] = OPTUNA_TRIALS
+    finally:
+        thermal.stop()
 
     total_min = (time.time() - t0) / 60
+    thermal.report()
 
     # Determine bottleneck
     bottleneck = advisor.determine_bottleneck(hw, model, result["best_params"], result["tg_tokens_per_sec"])

@@ -4,13 +4,144 @@ from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.panel import Panel
 
 app = typer.Typer(
     name="ggtune",
     help="Stop guessing llama.cpp parameters. Benchmark and find the fastest settings.",
-    no_args_is_help=True,
+    no_args_is_help=False,
 )
 console = Console()
+
+
+def _interactive_menu() -> None:
+    """Interactive TUI shown when ggtune is run without arguments."""
+    console.print(Panel(
+        "[bold cyan]GGTune[/] — llama.cpp auto-optimizer\n\n"
+        "  [bold][1][/]  Scan for .gguf models on this machine\n"
+        "  [bold][2][/]  Enter model path manually\n"
+        "  [bold][3][/]  Browse HuggingFace models\n"
+        "  [bold][4][/]  Show saved benchmark profiles\n"
+        "  [bold][5][/]  Hardware info\n"
+        "  [bold][q][/]  Exit",
+        border_style="cyan",
+    ))
+    try:
+        choice = input("Choice: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+
+    if choice == "1":
+        _menu_scan()
+    elif choice == "2":
+        _menu_manual()
+    elif choice == "3":
+        from ggtune.modules import hardware_scanner, hf_browser
+        hw = hardware_scanner.scan()
+        path = hf_browser.interactive_browse(hw)
+        if path and typer.confirm(f"\nRun benchmark on {path.name}?"):
+            from ggtune.orchestrator import run as _run
+            _run(str(path))
+    elif choice == "4":
+        _menu_profiles()
+    elif choice == "5":
+        _menu_hw()
+    # q / anything else → exit
+
+
+def _menu_scan() -> None:
+    import os
+    import subprocess
+    import platform
+
+    found: dict[str, int] = {}
+
+    def _add(p: Path) -> None:
+        name = p.name.lower()
+        if p.suffix != ".gguf" or not p.is_file():
+            return
+        if "mmproj" in name or "ggml-vocab" in name:
+            return
+        if p.stat().st_size < 50 * 1024 * 1024:
+            return
+        found[str(p)] = p.stat().st_size
+
+    home = Path.home()
+    for d in [home / "models", home / "Downloads",
+              home / ".cache" / "lm-studio" / "models",
+              home / ".local" / "share" / "models"]:
+        if d.exists():
+            for f in d.rglob("*.gguf"):
+                _add(f)
+
+    if platform.system() in ("Linux", "Darwin"):
+        try:
+            r = subprocess.run(["locate", "-r", r"\.gguf$"],
+                               capture_output=True, text=True, timeout=15)
+            for line in r.stdout.splitlines():
+                _add(Path(line.strip()))
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    if not found:
+        console.print("[yellow]No .gguf files found.[/]")
+        return
+
+    items = sorted(found.items(), key=lambda x: -x[1])
+    console.print()
+    for i, (fpath, size) in enumerate(items, 1):
+        console.print(f"  [dim]{i:2}.[/]  {size / 1e9:5.1f} GB  {fpath}")
+
+    console.print()
+    try:
+        pick = input("Run benchmark on # (or Enter to skip): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if pick.isdigit():
+        idx = int(pick) - 1
+        if 0 <= idx < len(items):
+            from ggtune.orchestrator import run as _run
+            _run(items[idx][0])
+
+
+def _menu_manual() -> None:
+    try:
+        path = input("Model path: ").strip().strip("'\"")
+    except (EOFError, KeyboardInterrupt):
+        return
+    if path:
+        from ggtune.orchestrator import run as _run
+        _run(path)
+
+
+def _menu_profiles() -> None:
+    from ggtune.modules import profile_storage
+    profiles = profile_storage.list_all()
+    if not profiles:
+        console.print("[dim]No saved profiles.[/]")
+        return
+    for p in profiles:
+        console.print(
+            f"[bold]{p.model_name}[/] ({p.model_quantization})  "
+            f"[green]{p.tg_tokens_per_sec:.1f} t/s[/]  "
+            f"ctx={p.optimal_context:,}  "
+            f"[dim]{p.created_at[:10]}  {p.hw_gpu_name}[/]"
+        )
+
+
+def _menu_hw() -> None:
+    from ggtune.modules import hardware_scanner
+    info = hardware_scanner.scan()
+    console.print(f"[bold]GPU:[/]  {info.gpu_name}  {info.vram_total_mb // 1024}GB  ({info.backend.value})")
+    console.print(f"[bold]CPU:[/]  {info.cpu_name}  {info.cores_physical}P / {info.cores_logical}L cores")
+    console.print(f"[bold]RAM:[/]  {info.ram_total_gb:.1f}GB total / {info.ram_available_gb:.1f}GB free")
+
+
+@app.callback(invoke_without_command=True)
+def _default(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _interactive_menu()
+
 
 
 @app.command()
