@@ -1,6 +1,7 @@
 """Module 6: Benchmark Engine — phases 6a (quick probe), 6b (Optuna TPE),
 6c (context search), 6d (stability pass)."""
 import csv
+import itertools
 import statistics
 import subprocess
 import time
@@ -15,6 +16,8 @@ from ggtune.config import (
     OPTUNA_TRIALS, OPTUNA_TIMEOUT_SEC,
     MIN_ACCEPTABLE_TG_RATIO, STABILITY_RUNS, STABILITY_CV_WARN,
 )
+
+GRID_SEARCH_THRESHOLD = OPTUNA_TRIALS  # use exhaustive grid when combos ≤ this
 from ggtune.models.bench_result import BenchResult
 from ggtune.models.model_profile import ModelProfile
 from ggtune.models.search_space import SearchSpace
@@ -123,7 +126,7 @@ def _build_cmd(
         "-m", model.path,
         "-ngl", "999",
         "-t", str(params.get("threads", 8)),
-        "-pg", "512,128",
+        "-pg", "512,32",
         "-r", str(BENCH_MEASUREMENT_RUNS),
         "-o", "csv",
     ]
@@ -254,6 +257,47 @@ def quick_probe(
     if not valid:
         raise RuntimeError("All quick probe runs crashed. Check llama.cpp installation.")
     return results
+
+
+# ── Phase 6b-alt: Exhaustive grid search (small spaces) ───────────────────
+
+def grid_search(
+    env_cfg: EnvConfig,
+    model: ModelProfile,
+    space: SearchSpace,
+    avail_flags: frozenset = _ALL_FLAGS,
+) -> Tuple[dict, float]:
+    """Exhaustive grid — guaranteed optimal when space is small."""
+    ncmoe_vals = list(space.ncmoe_range) if model.is_moe and space.ncmoe_range else [None]
+    combos = list(itertools.product(
+        ncmoe_vals, space.thread_candidates, space.kv_quant_options, space.nkvo_options
+    ))
+
+    best_params: dict = {}
+    best_tg: float = 0.0
+
+    with Progress(
+        SpinnerColumn(), TextColumn("{task.description}"),
+        BarColumn(), TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+    ) as progress:
+        task = progress.add_task("Grid search", total=len(combos))
+        for ncmoe, threads, ctk, nkvo in combos:
+            params = {"flash_attn": space.flash_attn, "threads": threads, "ctk": ctk, "nkvo": nkvo}
+            if ncmoe is not None:
+                params["ncmoe"] = ncmoe
+            else:
+                params["ngl"] = 999
+            r = run_bench(env_cfg, model, params, avail_flags=avail_flags)
+            if r.valid and r.tg_tokens_per_sec > best_tg:
+                best_tg = r.tg_tokens_per_sec
+                best_params = params.copy()
+            status = f"{r.tg_tokens_per_sec:.1f} t/s" if r.valid else "crash"
+            progress.update(task, advance=1, description=f"Grid search  best: {best_tg:.1f} t/s  last: {status}")
+
+    if not best_params:
+        raise RuntimeError("All grid search runs crashed.")
+    return best_params, best_tg
 
 
 # ── Phase 6b: Optuna TPE ──────────────────────────────────────────────────
@@ -438,21 +482,26 @@ def run_full(
     space: SearchSpace,
     avail_flags: frozenset = _ALL_FLAGS,
 ) -> dict:
-    """Run all 4 phases and return result dict."""
-    # 6a
-    info("Phase 1/4: Quick probe")
-    probe_results = quick_probe(env_cfg, model, space, avail_flags)
+    """Run all phases and return result dict."""
+    use_grid = space.total_combinations() <= GRID_SEARCH_THRESHOLD
 
-    # 6b
-    info("Phase 2/4: Optuna TPE search")
-    best_params, peak_tg = optuna_search(env_cfg, model, space, probe_results, avail_flags)
+    if use_grid:
+        info("Phase 1/3: Grid search (exhaustive, small space)")
+        best_params, peak_tg = grid_search(env_cfg, model, space, avail_flags)
+        ctx_phase = "Phase 2/3"
+        stab_phase = "Phase 3/3"
+    else:
+        info("Phase 1/4: Quick probe")
+        probe_results = quick_probe(env_cfg, model, space, avail_flags)
+        info("Phase 2/4: Optuna TPE search")
+        best_params, peak_tg = optuna_search(env_cfg, model, space, probe_results, avail_flags)
+        ctx_phase = "Phase 3/4"
+        stab_phase = "Phase 4/4"
 
-    # 6c
-    info("Phase 3/4: Context binary search")
+    info(f"{ctx_phase}: Context binary search")
     optimal_ctx, best_params = context_search(env_cfg, model, best_params, space, peak_tg, avail_flags)
 
-    # 6d
-    info("Phase 4/4: Stability check")
+    info(f"{stab_phase}: Stability check")
     mean_tg, std_tg, cv = stability_pass(env_cfg, model, best_params, optimal_ctx, avail_flags)
 
     return {

@@ -887,21 +887,27 @@ def _screen_model_and_run(model_path: str) -> None:
     # Benchmark mode selection
     from ggtune.config import OPTUNA_TRIALS, STABILITY_RUNS
     from ggtune.modules import search_space_builder
+    from ggtune.modules.benchmark_engine import GRID_SEARCH_THRESHOLD
     try:
         space = search_space_builder.build(hw, model)
-        probe_runs = space.estimated_quick_probe_runs()
         ctx_runs = len(space.context_candidates)
-        total_runs = probe_runs + OPTUNA_TRIALS + ctx_runs + STABILITY_RUNS
-        full_est = f"~{total_runs} runs"
+        total_combos = space.total_combinations()
+        if total_combos <= GRID_SEARCH_THRESHOLD:
+            search_runs = total_combos
+        else:
+            search_runs = space.estimated_quick_probe_runs() + OPTUNA_TRIALS
+        full_est = f"~{search_runs + ctx_runs + STABILITY_RUNS} runs"
+        quick_est = f"~{search_runs + STABILITY_RUNS} runs"
         ctx_list = ", ".join(f"{c // 1024}k" for c in space.context_candidates)
         ctx_note = f"context search: {ctx_list}"
     except Exception:
         full_est = "~70 runs"
+        quick_est = "~35 runs"
         ctx_note = ""
 
     console.print(Panel(
         f"  [bold cyan][1][/]  Full benchmark   [dim]({full_est}, {ctx_note})[/]\n"
-        f"  [bold cyan][2][/]  Quick benchmark  [dim](~35 runs, skips context search)[/]\n"
+        f"  [bold cyan][2][/]  Quick benchmark  [dim]({quick_est}, skips context search)[/]\n"
         f"  [bold cyan][b][/]  Back",
         title="[bold]Benchmark Mode[/]",
         border_style="dim",

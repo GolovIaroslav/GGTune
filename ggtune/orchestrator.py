@@ -134,13 +134,18 @@ def run(
         error(str(e))
         raise SystemExit(1)
 
-    quick_runs = space.estimated_quick_probe_runs()
     from ggtune.config import OPTUNA_TRIALS, STABILITY_RUNS
+    from ggtune.modules.benchmark_engine import GRID_SEARCH_THRESHOLD
     ctx_runs = len(space.context_candidates)
-    if quick:
-        est = quick_runs + OPTUNA_TRIALS + STABILITY_RUNS
+    total_combos = space.total_combinations()
+    if total_combos <= GRID_SEARCH_THRESHOLD:
+        search_runs = total_combos
     else:
-        est = quick_runs + OPTUNA_TRIALS + ctx_runs + STABILITY_RUNS
+        search_runs = space.estimated_quick_probe_runs() + OPTUNA_TRIALS
+    if quick:
+        est = search_runs + STABILITY_RUNS
+    else:
+        est = search_runs + ctx_runs + STABILITY_RUNS
     console.print(f"  ~{est} benchmark runs")
 
     # Benchmark + thermal monitoring
@@ -149,9 +154,14 @@ def run(
     t0 = time.time()
     try:
         if quick:
-            info("Quick mode: probe + Optuna only (no context search)")
-            probe = benchmark_engine.quick_probe(env_cfg, model, space, avail_flags)
-            best_params, peak_tg = benchmark_engine.optuna_search(env_cfg, model, space, probe, avail_flags)
+            use_grid = space.total_combinations() <= benchmark_engine.GRID_SEARCH_THRESHOLD
+            if use_grid:
+                info("Quick mode: grid search (small space, no context search)")
+                best_params, peak_tg = benchmark_engine.grid_search(env_cfg, model, space, avail_flags)
+            else:
+                info("Quick mode: probe + Optuna only (no context search)")
+                probe = benchmark_engine.quick_probe(env_cfg, model, space, avail_flags)
+                best_params, peak_tg = benchmark_engine.optuna_search(env_cfg, model, space, probe, avail_flags)
             mean_tg, std_tg, cv = benchmark_engine.stability_pass(env_cfg, model, best_params, 8192, avail_flags)
             result = {
                 "best_params": best_params,
