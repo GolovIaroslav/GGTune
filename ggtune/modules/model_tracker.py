@@ -155,9 +155,10 @@ def rescan_dirs() -> int:
 
 
 def _find_mmproj_near(model_path: Path) -> Optional[Path]:
-    """Look for mmproj .gguf files in the same directory."""
-    for f in model_path.parent.glob("mmproj*.gguf"):
-        return f
-    for f in model_path.parent.glob("*mmproj*.gguf"):
-        return f
+    """Look for mmproj .gguf files in the same directory (never returns model_path itself)."""
+    self_resolved = model_path.resolve()
+    for pattern in ("mmproj*.gguf", "*mmproj*.gguf"):
+        for f in model_path.parent.glob(pattern):
+            if f.resolve() != self_resolved:
+                return f
     return None
