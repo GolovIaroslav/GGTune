@@ -1,4 +1,5 @@
 """Module 4: Process Manager — find and kill GPU-hungry processes."""
+import platform
 import subprocess
 import sys
 import time
@@ -61,24 +62,45 @@ def _input_timed(timeout: int = 60) -> Optional[str]:
 
 
 def _gpu_mem_by_pid() -> Dict[int, int]:
-    """Returns {pid: vram_mb} for all GPU processes via nvidia-smi."""
+    """Returns {pid: vram_mb} for all GPU processes. Tries pynvml first, then nvidia-smi."""
+    # pynvml is the most reliable approach on Windows (nvidia-smi may not be in PATH)
     try:
-        r = subprocess.run(
-            ["nvidia-smi", "--query-compute-apps=pid,used_memory",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
-        )
-        result: Dict[int, int] = {}
-        for line in r.stdout.splitlines():
-            parts = line.strip().split(",")
-            if len(parts) == 2:
-                try:
-                    result[int(parts[0].strip())] = int(parts[1].strip())
-                except ValueError:
-                    pass
-        return result
+        import pynvml
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+        return {p.pid: p.usedGpuMemory // (1024 * 1024) for p in procs}
     except Exception:
-        return {}
+        pass
+
+    # Fallback: nvidia-smi (Linux/Mac have it in PATH; Windows may need full path)
+    smi_candidates = ["nvidia-smi"]
+    if platform.system() == "Windows":
+        smi_candidates += [
+            r"C:\Windows\System32\nvidia-smi.exe",
+            r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
+        ]
+    for smi in smi_candidates:
+        try:
+            r = subprocess.run(
+                [smi, "--query-compute-apps=pid,used_memory",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode != 0:
+                continue
+            result: Dict[int, int] = {}
+            for line in r.stdout.splitlines():
+                parts = line.strip().split(",")
+                if len(parts) == 2:
+                    try:
+                        result[int(parts[0].strip())] = int(parts[1].strip())
+                    except ValueError:
+                        pass
+            return result
+        except Exception:
+            continue
+    return {}
 
 
 # Each group: (group_key, display_name, description, pids, ram_mb, vram_mb, has_gpu)

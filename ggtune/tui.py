@@ -244,6 +244,10 @@ def _screen_models() -> Optional[str]:
 
     session_found: dict = {}  # path -> size_bytes, from disk scan this session
 
+    # Auto-rescan watch folders on entry
+    if model_tracker.load_scan_dirs():
+        model_tracker.rescan_dirs()
+
     while True:
         _clear()
         _banner("Models")
@@ -282,32 +286,33 @@ def _screen_models() -> Optional[str]:
                 "or [bold]3[/] in the main menu to download one.[/]"
             )
 
+        if platform.system() == "Windows":
+            scan_hints = "[bold]s[/bold] — scan"
+        else:
+            scan_hints = "[bold]s[/bold] — quick scan (locate)  [bold]f[/bold] — thorough scan (find)"
         console.print(
-            "\n  [dim][bold]number[/bold] — benchmark  "
-            "[bold]s[/bold] — quick scan  [bold]f[/bold] — thorough scan  "
+            f"\n  [dim][bold]number[/bold] — benchmark  {scan_hints}  "
             "[bold]d[/bold] — delete  [bold]a[/bold] — add watch folder  "
             "[bold]r[/bold] — rescan folders  [bold]b[/bold] — back[/dim]"
         )
-        choice = _ask("").strip().lower()
+        choice = _ask("Choice: ").strip().lower()
 
         if choice in ("b", ""):
             return None
 
         elif choice == "s":
             if platform.system() == "Windows":
-                console.print("[dim]Scanning common locations...[/]")
+                console.print("[dim]Scanning folders...[/]")
+                items = _scan_gguf_files("find")
             else:
                 console.print("[dim]Scanning via locate...[/]")
-            items = _scan_gguf_files("locate")
+                items = _scan_gguf_files("locate")
             new = sum(1 for p, _ in items if p not in session_found and p not in tracked_paths)
             session_found.update({p: sz for p, sz in items})
             console.print(f"[dim]Found {len(items)} model(s), {new} new.[/]")
 
-        elif choice == "f":
-            if platform.system() == "Windows":
-                console.print("[dim]Scanning home folder and other drives — up to 60 sec...[/]")
-            else:
-                console.print("[dim]Running find — up to 30 seconds...[/]")
+        elif choice == "f" and platform.system() != "Windows":
+            console.print("[dim]Running find — up to 30 seconds...[/]")
             items = _scan_gguf_files("find")
             new = sum(1 for p, _ in items if p not in session_found and p not in tracked_paths)
             session_found.update({p: sz for p, sz in items})
@@ -347,7 +352,9 @@ def _screen_models() -> Optional[str]:
                 p = Path(folder).expanduser()
                 if p.is_dir():
                     model_tracker.add_scan_dir(str(p))
-                    console.print(f"[green]✓ Added. Press [bold]r[/] to scan it.[/]")
+                    console.print("[dim]Scanning...[/]")
+                    n = model_tracker.rescan_dirs()
+                    console.print(f"[green]✓ Added. Found {n} new model(s).[/]")
                 else:
                     console.print("[red]Directory not found.[/]")
 

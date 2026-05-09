@@ -7,6 +7,7 @@ _SYSTEM = platform.system()
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.rule import Rule
 from rich.table import Table
 from rich import box
 
@@ -69,12 +70,10 @@ def generate_launch_cmd(
     ]
 
     if _SYSTEM == "Windows":
-        flags_str = " ^\n  ".join(flags)
-        return f"{env_cfg.llama_server_path} ^\n  {flags_str}"
+        return f"{env_cfg.llama_server_path} {' '.join(flags)}"
     else:
-        flags_str = " \\\n  ".join(flags)
         ld = f"LD_LIBRARY_PATH={env_cfg.bin_dir}:$LD_LIBRARY_PATH"
-        return f"{ld} \\\n  {env_cfg.llama_server_path} \\\n  {flags_str}"
+        return f"{ld} {env_cfg.llama_server_path} {' '.join(flags)}"
 
 
 def _build_diagnostics(
@@ -224,16 +223,18 @@ def print_report(
         f"  {param_str}",
         f"  -c {ctx}",
         "",
-        "[bold cyan]LAUNCH COMMAND[/]",
-        f"  [bold]{launch_cmd}[/]",
     ]
 
     if params.get("nkvo"):
-        lines.insert(-1, "")
-        lines.insert(-1, "[yellow]⚠  KV cache in RAM. Speed decreases as context grows.[/]")
+        lines.append("")
+        lines.append("[yellow]⚠  KV cache in RAM. Speed decreases as context grows.[/]")
 
     console.print(Panel("\n".join(lines), title="GGTune Results", border_style="cyan"))
     console.print("\n".join(_build_diagnostics(hw, model, result, env_cfg)))
+    console.print()
+    console.print(Rule("Launch Command", style="bold cyan"))
+    console.print(launch_cmd)
+    console.print()
 
     return bottleneck
 
