@@ -38,7 +38,11 @@ def _thread_candidates(hw: HardwareProfile) -> List[int]:
     return candidates
 
 
-def build(hw: HardwareProfile, model: ModelProfile) -> SearchSpace:
+_ALL_FLAGS = frozenset({"fa", "nkvo", "ncmoe", "ctk"})
+
+
+def build(hw: HardwareProfile, model: ModelProfile,
+          avail_flags: frozenset = _ALL_FLAGS) -> SearchSpace:
     if model.file_size_gb > hw.ram_total_gb * 0.85:
         raise RuntimeError(
             f"Model {model.file_size_gb:.1f}GB won't fit in RAM "
@@ -46,8 +50,8 @@ def build(hw: HardwareProfile, model: ModelProfile) -> SearchSpace:
         )
 
     threads = _thread_candidates(hw)
-    flash_attn = hw.backend in (Backend.CUDA, Backend.ROCM, Backend.METAL)
-    kv_quants = ["f16", "q8_0", "q4_0"]
+    flash_attn = hw.backend in (Backend.CUDA, Backend.ROCM, Backend.METAL) and "fa" in avail_flags
+    kv_quants = ["f16", "q8_0", "q4_0"] if "ctk" in avail_flags else ["f16"]
 
     ctx_cap = max_practical_ctx(hw, model)
     ctx_candidates = [
@@ -59,7 +63,7 @@ def build(hw: HardwareProfile, model: ModelProfile) -> SearchSpace:
                           if any(c <= model.context_length_max for c in CONTEXT_CANDIDATES)
                           else CONTEXT_CANDIDATES[0]]
 
-    if model.is_moe and model.n_experts_total and model.n_experts_used:
+    if model.is_moe and model.n_experts_total and model.n_experts_used and "ncmoe" in avail_flags:
         # ncmoe=N: N experts per layer stay in CPU RAM, (total-N) go to GPU VRAM.
         # Low ncmoe = most experts on GPU = fast (might OOM; benchmark handles crashes).
         # High ncmoe = most experts in CPU = uses less VRAM, much slower.

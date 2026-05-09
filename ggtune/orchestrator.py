@@ -16,6 +16,7 @@ from ggtune.modules import (
     benchmark_engine,
     profile_storage,
     advisor,
+    compat_guard,
 )
 from ggtune.utils.formatting import info, warn, error
 
@@ -116,13 +117,19 @@ def run(
             error(str(e))
             raise SystemExit(1)
 
+    # Probe which optional flags this build of llama-bench actually supports
+    avail_flags = compat_guard.probe_bench_flags(env_cfg.bin_dir)
+    missing = compat_guard._ALL_BENCH_FLAGS - avail_flags
+    if missing:
+        warn(f"Flags not found in this llama-bench build: {', '.join(sorted(missing))} — will be skipped")
+
     # Free up resources
     process_manager.prompt_and_kill()
 
     # Build search space
     info("Building search space...")
     try:
-        space = search_space_builder.build(hw, model)
+        space = search_space_builder.build(hw, model, avail_flags)
     except RuntimeError as e:
         error(str(e))
         raise SystemExit(1)
@@ -143,9 +150,9 @@ def run(
     try:
         if quick:
             info("Quick mode: probe + Optuna only (no context search)")
-            probe = benchmark_engine.quick_probe(env_cfg, model, space)
-            best_params, peak_tg = benchmark_engine.optuna_search(env_cfg, model, space, probe)
-            mean_tg, std_tg, cv = benchmark_engine.stability_pass(env_cfg, model, best_params, 8192)
+            probe = benchmark_engine.quick_probe(env_cfg, model, space, avail_flags)
+            best_params, peak_tg = benchmark_engine.optuna_search(env_cfg, model, space, probe, avail_flags)
+            mean_tg, std_tg, cv = benchmark_engine.stability_pass(env_cfg, model, best_params, 8192, avail_flags)
             result = {
                 "best_params": best_params,
                 "tg_tokens_per_sec": mean_tg,
@@ -156,7 +163,7 @@ def run(
                 "optuna_trials": OPTUNA_TRIALS,
             }
         else:
-            result = benchmark_engine.run_full(env_cfg, model, space)
+            result = benchmark_engine.run_full(env_cfg, model, space, avail_flags)
             result["optuna_trials"] = OPTUNA_TRIALS
     finally:
         thermal.stop()

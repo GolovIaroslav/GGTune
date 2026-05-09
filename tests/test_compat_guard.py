@@ -40,11 +40,21 @@ def test_missing_binary_non_critical(tmp_path):
     bench.touch()
     cli.touch()
 
+    # Critical tests must pass; non-critical (fa/nkvo/ncmoe) may fail
+    cli_outputs = {"--list-devices": "Available devices:\n  CPU (default)"}
+
     def fake_run(cmd, **kwargs):
-        return _make_proc(stdout="Usage: llama-bench -m model -fa 1")
+        binary = cmd[0].split("/")[-1]
+        arg = cmd[1] if len(cmd) > 1 else ""
+        if binary == "llama-cli":
+            return _make_proc(stdout=cli_outputs.get(arg, ""))
+        # llama-bench: return minimal valid output (critical test passes, -fa not present)
+        return _make_proc(stdout="Usage: llama-bench -m model")
 
     with patch("subprocess.run", side_effect=fake_run):
         report = run_tests(str(tmp_path))
 
-    # Should not raise even if non-critical tests fail
-    assert isinstance(report.all_critical_passed, bool)
+    assert report.all_critical_passed
+    # -fa is not in bench --help output, so that non-critical test should fail
+    fa_result = next(r for r in report.results if r.test.name == "-fa flag")
+    assert not fa_result.passed

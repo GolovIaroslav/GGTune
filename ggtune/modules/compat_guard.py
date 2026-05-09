@@ -163,6 +163,46 @@ class Change:
     is_breaking: bool
 
 
+_ALL_BENCH_FLAGS = frozenset({"fa", "nkvo", "ncmoe", "ctk"})
+
+
+def probe_bench_flags(bin_dir: str) -> frozenset:
+    """Run llama-bench --help once and return set of flag names that exist.
+
+    Checks: 'fa', 'nkvo', 'ncmoe', 'ctk'.
+    On error (binary not found, timeout) returns all flags — fail-open.
+    """
+    import platform
+    from ggtune.utils.shell import make_env_with_lib
+
+    bin_path = Path(bin_dir)
+    sfx = ".exe" if platform.system() == "Windows" else ""
+    bench = bin_path / f"llama-bench{sfx}"
+
+    if not bench.exists():
+        return _ALL_BENCH_FLAGS
+
+    try:
+        proc = subprocess.run(
+            [str(bench), "--help"],
+            capture_output=True, text=True, timeout=10,
+            env=make_env_with_lib(bin_dir),
+        )
+        out = proc.stdout + proc.stderr
+        flags: set = set()
+        if "-fa" in out:
+            flags.add("fa")
+        if "-ctk" in out or "cache-type-k" in out:
+            flags.add("ctk")
+        if "nkvo" in out.lower():
+            flags.add("nkvo")
+        if "ncmoe" in out.lower():
+            flags.add("ncmoe")
+        return frozenset(flags)
+    except Exception:
+        return _ALL_BENCH_FLAGS
+
+
 def get_latest_build() -> Optional[str]:
     """Return the tag of the latest llama.cpp release, e.g. 'b9070'."""
     try:
