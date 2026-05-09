@@ -5,6 +5,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -177,10 +178,9 @@ def _find_bench_with_via() -> tuple[Optional[Path], str]:
     if p:
         return p, "locate"
 
-    p = _find_via_system_search("llama-bench")
-    if p:
-        return p, "find"
-
+    # _find_via_system_search is intentionally omitted here — it runs slow
+    # PowerShell/find sweeps and would block every detect() call.
+    # Use scan_deep() when a thorough search is needed.
     return None, ""
 
 
@@ -466,6 +466,9 @@ def _pick_prebuilt_asset(assets: list, backend: Backend) -> tuple[Optional[str],
         url = asset.get("browser_download_url", "")
         if not url or sys_key not in name:
             continue
+        # cudart-* zips contain only CUDA runtime DLLs, not llama-bench
+        if name.startswith("cudart-"):
+            continue
         score = 0
         if _SYSTEM == "Windows":
             if backend == Backend.CUDA and "cuda" in name and arch in name:
@@ -496,6 +499,50 @@ def _pick_prebuilt_asset(assets: list, backend: Backend) -> tuple[Optional[str],
 def prebuilt_available() -> bool:
     """True if pre-built binaries are published for this OS."""
     return _SYSTEM in ("Windows", "Darwin")
+
+
+def _download_cudart_dlls(assets: list, bin_dir: Path, console) -> None:
+    """Download the cudart companion ZIP and extract DLLs into bin_dir.
+
+    The main llama.cpp CUDA ZIP contains ggml-cuda.dll but not the CUDA
+    runtime DLLs (cublas64_12.dll, cublasLt64_12.dll, cudart64_12.dll …).
+    Those live in a separate cudart-* ZIP that must be extracted alongside.
+    """
+    cudart_url: Optional[str] = None
+    cudart_name: Optional[str] = None
+    for asset in assets:
+        name = asset.get("name", "").lower()
+        url  = asset.get("browser_download_url", "")
+        if url and name.startswith("cudart-") and "win" in name and name.endswith(".zip"):
+            cudart_url  = url
+            cudart_name = asset["name"]
+            break
+
+    if not cudart_url:
+        return
+
+    console.print(f"  Downloading [bold]{cudart_name}[/] (CUDA runtime DLLs)...")
+    try:
+        r = requests.get(cudart_url, stream=True, timeout=120)
+        r.raise_for_status()
+        data = r.content
+    except Exception as e:
+        console.print(f"  [yellow]CUDA runtime DLL download failed: {e}[/]")
+        return
+
+    try:
+        import zipfile
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            for member in zf.namelist():
+                if member.lower().endswith(".dll"):
+                    # Extract flat into bin_dir (ignore any subdirectory in the ZIP)
+                    dll_name = Path(member).name
+                    dest = bin_dir / dll_name
+                    if not dest.exists():
+                        dest.write_bytes(zf.read(member))
+        console.print("  [dim]CUDA runtime DLLs installed.[/]")
+    except Exception as e:
+        console.print(f"  [yellow]CUDA runtime DLL extraction failed: {e}[/]")
 
 
 def download_prebuilt(backend: Backend, build: str, install_dir: Path) -> Optional[Path]:
@@ -563,15 +610,64 @@ def download_prebuilt(backend: Backend, build: str, install_dir: Path) -> Option
 
     # Locate the directory containing llama-bench
     exe_name = _exe("llama-bench")
+    bin_dir: Optional[Path] = None
     for root, _dirs, files in os.walk(install_dir):
         if exe_name in files:
-            return Path(root)
+            bin_dir = Path(root)
+            break
 
-    console.print("  [red]Extracted but llama-bench not found in archive.[/]")
-    return None
+    if bin_dir is None:
+        console.print("  [red]Extracted but llama-bench not found in archive.[/]")
+        return None
+
+    # On Windows CUDA builds, download the companion cudart DLLs package.
+    # ggml-cuda.dll is present in the main ZIP but needs cublas64_12.dll etc.
+    if _SYSTEM == "Windows" and backend == Backend.CUDA:
+        _download_cudart_dlls(assets, bin_dir, console)
+
+    return bin_dir
 
 
 # ── Build from source ──────────────────────────────────────────────────────
+
+def _find_cmake_windows() -> Optional[str]:
+    """Return the path to cmake.exe on Windows, checking VS Build Tools and standalone installs."""
+    found = shutil.which("cmake")
+    if found:
+        return found
+    prog   = os.environ.get("PROGRAMFILES",      "C:/Program Files")
+    prog86 = os.environ.get("PROGRAMFILES(X86)", "C:/Program Files (x86)")
+    candidates: list[str] = [
+        f"{prog}/CMake/bin/cmake.exe",
+        f"{prog86}/CMake/bin/cmake.exe",
+    ]
+    for year in ("2022", "2019", "2017"):
+        for edition in ("BuildTools", "Community", "Professional", "Enterprise"):
+            for base in (prog86, prog):
+                candidates.append(
+                    f"{base}/Microsoft Visual Studio/{year}/{edition}/Common7/IDE/"
+                    f"CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe"
+                )
+    for path in candidates:
+        if Path(path).exists():
+            return path
+    return None
+
+
+def _rmtree_force(path: Path) -> None:
+    """Remove a directory tree, handling read-only files (git pack files on Windows)."""
+    if not path.exists():
+        return
+
+    def _on_error(func, fpath, exc_info):
+        try:
+            os.chmod(fpath, stat.S_IWRITE)
+            func(fpath)
+        except Exception:
+            pass
+
+    shutil.rmtree(str(path), onerror=_on_error)
+
 
 def _find_bin_dir(root: Path) -> Path:
     """Find the directory containing llama-bench after a build."""
@@ -601,8 +697,22 @@ def _build_llama_cpp(backend: Backend, target_build: str, install_dir: Path) -> 
         Backend.CPU:   [],
     }[backend]
 
+    # On Windows cmake may live inside VS Build Tools but not be on PATH.
+    cmake_exe = _find_cmake_windows() if _SYSTEM == "Windows" else "cmake"
+    if cmake_exe is None:
+        raise RuntimeError(
+            "cmake not found. Install it from cmake.org or via Visual Studio Build Tools "
+            "(make sure 'C++ CMake tools for Windows' is selected in the VS installer)."
+        )
+
     def _run(*cmd, **kwargs):
-        result = subprocess.run(list(cmd), **kwargs)
+        try:
+            result = subprocess.run(list(cmd), **kwargs)
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"Command not found: '{cmd[0]}'. "
+                "Make sure it is installed and available in your PATH."
+            )
         if result.returncode != 0:
             raise RuntimeError(
                 f"{cmd[0]} failed (exit {result.returncode}) — "
@@ -610,8 +720,8 @@ def _build_llama_cpp(backend: Backend, target_build: str, install_dir: Path) -> 
             )
 
     tmp_dir = install_dir.parent / "llama.cpp.building"
-    if tmp_dir.exists():
-        shutil.rmtree(str(tmp_dir))
+    # _rmtree_force handles read-only git pack files on Windows (WinError 5)
+    _rmtree_force(tmp_dir)
     install_dir.parent.mkdir(parents=True, exist_ok=True)
 
     from rich.console import Console as _Con
@@ -622,11 +732,11 @@ def _build_llama_cpp(backend: Backend, target_build: str, install_dir: Path) -> 
          LLAMA_CPP_REPO, str(tmp_dir), timeout=600)
 
     con.print("  [dim]Running cmake configure...[/]")
-    _run("cmake", "-B", "build", "-DCMAKE_BUILD_TYPE=Release", *cmake_flags,
+    _run(cmake_exe, "-B", "build", "-DCMAKE_BUILD_TYPE=Release", *cmake_flags,
          cwd=tmp_dir, timeout=120)
 
     con.print(f"  [dim]Compiling with {os.cpu_count()} threads — this takes 5–20 min...[/]")
-    _run("cmake", "--build", "build", "--config", "Release",
+    _run(cmake_exe, "--build", "build", "--config", "Release",
          f"-j{os.cpu_count()}", cwd=tmp_dir, timeout=1800)
 
     # Detect where binaries actually landed (location changed across llama.cpp versions)
@@ -634,8 +744,7 @@ def _build_llama_cpp(backend: Backend, target_build: str, install_dir: Path) -> 
     bin_dir_rel = bin_dir_in_tmp.relative_to(tmp_dir)
 
     con.print("  [dim]Swapping in new build...[/]")
-    if install_dir.exists():
-        shutil.rmtree(str(install_dir))
+    _rmtree_force(install_dir)
     shutil.move(str(tmp_dir), str(install_dir))
 
     result_bin_dir = install_dir / bin_dir_rel

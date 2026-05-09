@@ -93,14 +93,16 @@ COMPAT_TESTS = [
 
 
 def run_tests(bin_dir: str) -> CompatReport:
+    import platform
     from ggtune.utils.shell import make_env_with_lib
     bin_path = Path(bin_dir)
     build = LLAMA_CPP_PINNED_BUILD
     env = make_env_with_lib(bin_dir)
     results = []
+    _sfx = ".exe" if platform.system() == "Windows" else ""
 
     for test in COMPAT_TESTS:
-        binary = bin_path / test.binary
+        binary = bin_path / (test.binary + _sfx)
         if not binary.exists():
             results.append(TestResult(test=test, passed=False, output="", error="binary not found"))
             if test.critical:

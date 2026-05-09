@@ -68,16 +68,18 @@ def _has_bin(name: str) -> bool:
 def _screen_setup(hw) -> None:
     """First-run wizard: detects missing deps and offers to install llama.cpp."""
     from ggtune.modules import env_manager
+    from ggtune.config import LLAMA_INSTALL_DIR, LLAMA_CPP_PINNED_BUILD
 
     _clear()
     _banner("Setup")
 
+    sys = platform.system()
     has_gpu = hw.backend.value != "cpu"
-    drv_ok = _driver_ok(hw.driver_version)
+    drv_ok  = _driver_ok(hw.driver_version)
     drv_str = hw.driver_version or "not detected"
-    minimum = _DRIVER_MIN.get(platform.system(), 525)
+    minimum = _DRIVER_MIN.get(sys, 525)
 
-    # System status table
+    # ── Status table ───────────────────────────────────────────────────────
     t = Table.grid(padding=(0, 2))
     t.add_column(style="dim", min_width=10)
     t.add_column(min_width=28)
@@ -85,67 +87,113 @@ def _screen_setup(hw) -> None:
 
     gpu_label = f"{hw.gpu_name}  ({hw.vram_total_mb // 1024} GB)" if has_gpu else "none detected"
     t.add_row("GPU:", gpu_label, "[green]✓[/]" if has_gpu else "[dim]-[/]")
-
     if has_gpu:
         drv_status = "[green]✓[/]" if drv_ok else f"[red]✗ need ≥{minimum}[/]"
         t.add_row("Driver:", drv_str, drv_status)
-
     t.add_row("llama.cpp:", "[red]not found[/]", "[red]✗[/]")
     console.print(t)
     console.print()
 
-    # Driver warning with fix instructions
     if has_gpu and not drv_ok:
         console.print(f"  [yellow]NVIDIA driver too old for CUDA 12.4 (need ≥{minimum}).[/]")
-        if platform.system() == "Linux":
+        if sys == "Linux":
             console.print("  Fix:  [dim]sudo apt install nvidia-driver-550[/]")
             console.print("        [dim](or: ubuntu-drivers autoinstall)[/]")
-        elif platform.system() == "Windows":
+        elif sys == "Windows":
             console.print("  Fix:  [dim]nvidia.com/drivers — download and run installer[/]")
-        console.print("  You can still build CPU-only and use GPU after updating drivers.\n")
+        console.print("  You can still use CPU-only and switch to GPU after updating drivers.\n")
 
-    # Check build prerequisites
-    has_git   = _has_bin("git")
-    has_cmake = _has_bin("cmake")
-    has_cxx   = _has_bin("g++") or _has_bin("clang++") or _has_bin("cl")
-    prereqs   = has_git and has_cmake and has_cxx
+    # ── Build tool detection ───────────────────────────────────────────────
+    # On Windows cmake often lives inside VS Build Tools, not on PATH.
+    # _find_cmake_windows() checks ~24 known VS / standalone cmake paths.
+    has_git = _has_bin("git")
+    if sys == "Windows":
+        cmake_path = env_manager._find_cmake_windows()
+        has_cmake  = cmake_path is not None
+        cmake_tag  = " [dim](VS Build Tools)[/]" if has_cmake and not _has_bin("cmake") else ""
+        # cmake from VS Build Tools bundles cl.exe; cmake finds it via vswhere automatically
+        has_cxx = has_cmake or _has_bin("g++") or _has_bin("clang++") or _has_bin("cl")
+    else:
+        cmake_path = None
+        cmake_tag  = ""
+        has_cmake  = _has_bin("cmake")
+        has_cxx    = _has_bin("g++") or _has_bin("clang++") or _has_bin("cl")
+
+    prereqs = has_git and has_cmake and has_cxx
 
     console.print("  Build prerequisites:")
     console.print(f"    git     {'[green]✓[/]' if has_git   else '[red]✗[/]'}")
-    console.print(f"    cmake   {'[green]✓[/]' if has_cmake else '[red]✗[/]'}")
+    console.print(f"    cmake   {('[green]✓[/]' + cmake_tag) if has_cmake else '[red]✗[/]'}")
     console.print(f"    c++     {'[green]✓[/]' if has_cxx   else '[red]✗[/]'}")
     console.print()
 
     if not prereqs:
-        console.print("  [yellow]Install missing tools first:[/]")
-        if platform.system() == "Linux":
+        if sys == "Windows":
+            console.print("  [yellow]Build tools not found — use option [1] to download a pre-built binary.[/]")
+            console.print("  [dim]To build from source: Visual Studio Build Tools (C++ workload + CMake) + Git[/]")
+        elif sys == "Linux":
+            console.print("  [yellow]Install missing tools first:[/]")
             console.print("    [dim]sudo apt install git cmake build-essential[/]  (Debian/Ubuntu)")
             console.print("    [dim]sudo dnf install git cmake gcc-c++[/]  (Fedora/RHEL)")
-        elif platform.system() == "Darwin":
+        elif sys == "Darwin":
+            console.print("  [yellow]Install missing tools first:[/]")
             console.print("    [dim]brew install git cmake[/]")
             console.print("    [dim]xcode-select --install[/]")
-        elif platform.system() == "Windows":
-            console.print("    [dim]Install: Visual Studio Build Tools + CMake + Git[/]")
         console.print()
 
-    can_cuda = has_gpu and drv_ok and prereqs
-    can_cpu  = prereqs
+    # ── Menu ──────────────────────────────────────────────────────────────
+    can_prebuilt = sys == "Windows"           # GitHub releases always have Windows ZIPs
+    can_cuda     = has_gpu and drv_ok and prereqs
+    can_cpu      = prereqs
 
-    lines = []
+    # option_map tracks which action each digit actually triggers (varies by platform/state)
+    option_map: dict[str, str] = {}
+    lines: list[str] = []
+    n = 1  # next available number
+
+    if can_prebuilt:
+        flavor = "CUDA" if (has_gpu and drv_ok) else "CPU/AVX2"
+        lines.append(
+            f"  [bold cyan][{n}][/]  Download pre-built [dim]({flavor} — no build tools needed)[/]"
+        )
+        option_map[str(n)] = "prebuilt"
+        n += 1
+
     if can_cuda:
-        lines.append("  [bold cyan][1][/]  Build with CUDA  [dim](GPU — recommended, ~10 min)[/]")
+        lines.append(f"  [bold cyan][{n}][/]  Build with CUDA  [dim](GPU — ~10–20 min)[/]")
+        option_map[str(n)] = "cuda"
+        n += 1
     elif has_gpu and not drv_ok:
-        lines.append("  [dim][1]  Build with CUDA — update drivers first[/]")
+        lines.append(f"  [dim][{n}]  Build with CUDA — update drivers first[/]")
+        n += 1
+    elif has_gpu:
+        lines.append(f"  [dim][{n}]  Build with CUDA — install build tools first[/]")
+        n += 1
+
     if can_cpu:
-        lines.append("  [bold cyan][2][/]  Build CPU-only  [dim](works without GPU, ~5 min)[/]")
-    lines.append("  [bold cyan][3][/]  Already installed — re-scan  [dim](PATH / custom location)[/]")
+        lines.append(f"  [bold cyan][{n}][/]  Build CPU-only  [dim](~5–10 min)[/]")
+        option_map[str(n)] = "cpu"
+        n += 1
+    elif not can_prebuilt:  # on Linux/Mac, show the hint even when tools missing
+        lines.append(f"  [dim][{n}]  Build CPU-only — install build tools first[/]")
+        n += 1
+
+    lines.append(f"  [bold cyan][{n}][/]  Already installed — re-scan  [dim](PATH / custom location)[/]")
+    option_map[str(n)] = "rescan"
     lines.append("  [bold cyan][s][/]  Skip  [dim](main menu, benchmarks won't work)[/]")
 
     console.print(Panel("\n".join(lines), border_style="dim", padding=(1, 4), width=WIDTH))
     choice = _ask("Choice: ")
 
-    if choice == "1" and can_cuda:
-        console.print("\n  [dim]Building llama.cpp with CUDA — may take 5–20 min...[/]")
+    Backend = __import__("ggtune.models.hardware", fromlist=["Backend"]).Backend
+    action  = option_map.get(choice)
+
+    if action == "prebuilt":
+        _do_install(LLAMA_CPP_PINNED_BUILD, hw, env_manager, LLAMA_INSTALL_DIR)
+        _ask("\nPress Enter to continue")
+
+    elif action == "cuda":
+        console.print("\n  [dim]Building llama.cpp with CUDA — may take 10–20 min...[/]")
         try:
             env_manager.install(hw)
             console.print("  [green]✓ Done! llama.cpp installed.[/]")
@@ -153,9 +201,9 @@ def _screen_setup(hw) -> None:
             console.print(f"  [red]Build failed: {e}[/]")
         _ask("\nPress Enter to continue")
 
-    elif choice == "2" and can_cpu:
-        hw.backend = __import__("ggtune.models.hardware", fromlist=["Backend"]).Backend.CPU
-        console.print("\n  [dim]Building CPU-only llama.cpp — ~5 min...[/]")
+    elif action == "cpu":
+        hw.backend = Backend.CPU
+        console.print("\n  [dim]Building CPU-only llama.cpp — ~5–10 min...[/]")
         try:
             env_manager.install(hw)
             console.print("  [green]✓ Done! CPU-only llama.cpp installed.[/]")
@@ -163,7 +211,7 @@ def _screen_setup(hw) -> None:
             console.print(f"  [red]Build failed: {e}[/]")
         _ask("\nPress Enter to continue")
 
-    elif choice == "3":
+    elif action == "rescan":
         env_manager.clear_cache()
         console.print("  [dim]Scanning...[/]")
         try:
@@ -172,7 +220,8 @@ def _screen_setup(hw) -> None:
         except RuntimeError:
             console.print(
                 "  [red]Not found.[/]\n"
-                "  Make sure [bold]llama-bench[/] is in your PATH, or add its directory to PATH and re-run."
+                "  Make sure [bold]llama-bench[/] is in your PATH, "
+                "or add its directory to PATH and re-run."
             )
         _ask("\nPress Enter to continue")
     # "s" or anything else → fall through to main menu
@@ -245,14 +294,20 @@ def _screen_models() -> Optional[str]:
             return None
 
         elif choice == "s":
-            console.print("[dim]Scanning via locate...[/]")
+            if platform.system() == "Windows":
+                console.print("[dim]Scanning common locations...[/]")
+            else:
+                console.print("[dim]Scanning via locate...[/]")
             items = _scan_gguf_files("locate")
             new = sum(1 for p, _ in items if p not in session_found and p not in tracked_paths)
             session_found.update({p: sz for p, sz in items})
             console.print(f"[dim]Found {len(items)} model(s), {new} new.[/]")
 
         elif choice == "f":
-            console.print("[dim]Running find — up to 30 seconds...[/]")
+            if platform.system() == "Windows":
+                console.print("[dim]Scanning home folder and other drives — up to 60 sec...[/]")
+            else:
+                console.print("[dim]Running find — up to 30 seconds...[/]")
             items = _scan_gguf_files("find")
             new = sum(1 for p, _ in items if p not in session_found and p not in tracked_paths)
             session_found.update({p: sz for p, sz in items})
@@ -435,7 +490,45 @@ def _scan_gguf_files(search_method: str = "locate") -> List[Tuple[str, int]]:
                 for f in d.rglob(f"*{ext}"):
                     _add(f)
 
-    if sys in ("Linux", "Darwin"):
+    if sys == "Windows":
+        if search_method == "find":
+            # Walk user home + secondary drives, skipping known noisy directories
+            import string as _str
+            _skip = {
+                "appdata\\local\\temp",
+                "appdata\\local\\microsoft",
+                "appdata\\roaming\\microsoft",
+                "appdata\\local\\google",
+                "appdata\\local\\mozilla",
+                "appdata\\local\\nvidia",
+                "appdata\\locallow",
+                ".git", "node_modules", "__pycache__", ".venv", "venv",
+            }
+
+            def _skip_dir(parent: str, d: str) -> bool:
+                full = (parent + "\\" + d).lower()
+                return d.startswith("$") or any(s in full for s in _skip)
+
+            walk_roots = [home]
+            for _drive in _str.ascii_uppercase[3:8]:  # D: through H:
+                _dp = Path(f"{_drive}:\\")
+                if _dp.exists():
+                    walk_roots.append(_dp)
+
+            for walk_root in walk_roots:
+                try:
+                    for dirpath, dirnames, filenames in os.walk(str(walk_root), topdown=True):
+                        dirnames[:] = [d for d in dirnames if not _skip_dir(dirpath, d)]
+                        for fname in filenames:
+                            if Path(fname).suffix.lower() in MODEL_EXTENSIONS:
+                                try:
+                                    _add(Path(dirpath) / fname)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+
+    elif sys in ("Linux", "Darwin"):
         if search_method == "find":
             try:
                 args = ["find", str(home), "-type", "f"]
@@ -1022,8 +1115,11 @@ def _screen_llama_update() -> None:
         elif choice == "s":
             console.print("  [dim]Deep scanning — may take 30–60 seconds...[/]")
             installs = env_manager.scan_deep(hw)
-            console.print(f"  [green]Found {len(installs)} installation(s).[/]")
-            # loop will redraw
+            if installs:
+                console.print(f"  [green]Found {len(installs)} installation(s).[/]")
+            else:
+                console.print("  [yellow]No llama.cpp installations found on this system.[/]")
+            _ask("  Press Enter to continue")
 
         else:
             try:

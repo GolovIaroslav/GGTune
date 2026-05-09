@@ -30,7 +30,11 @@ def run_checked(cmd: list[str], **kwargs) -> str:
 
 def make_env_with_lib(bin_dir: str) -> dict:
     env = os.environ.copy()
-    if platform.system() != "Windows":
+    if platform.system() == "Windows":
+        # Prepend bin_dir to PATH so cublas/cudart DLLs next to the exe are found
+        existing = env.get("PATH", "")
+        env["PATH"] = f"{bin_dir};{existing}" if existing else bin_dir
+    else:
         existing = env.get("LD_LIBRARY_PATH", "")
         env["LD_LIBRARY_PATH"] = f"{bin_dir}:{existing}" if existing else bin_dir
     return env

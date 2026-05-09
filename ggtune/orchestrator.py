@@ -130,8 +130,11 @@ def run(
     quick_runs = space.estimated_quick_probe_runs()
     from ggtune.config import OPTUNA_TRIALS, STABILITY_RUNS
     ctx_runs = len(space.context_candidates)
-    total_est = quick_runs + OPTUNA_TRIALS + ctx_runs + STABILITY_RUNS
-    console.print(f"  ~{total_est} benchmark runs")
+    if quick:
+        est = quick_runs + OPTUNA_TRIALS + STABILITY_RUNS
+    else:
+        est = quick_runs + OPTUNA_TRIALS + ctx_runs + STABILITY_RUNS
+    console.print(f"  ~{est} benchmark runs")
 
     # Benchmark + thermal monitoring
     thermal = _ThermalWatcher()
