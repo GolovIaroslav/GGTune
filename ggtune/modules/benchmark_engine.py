@@ -1,6 +1,7 @@
 """Module 6: Benchmark Engine — phases 6a (quick probe), 6b (Optuna TPE),
 6c (context search), 6d (stability pass)."""
 import csv
+import itertools
 import statistics
 import subprocess
 import time
@@ -15,6 +16,8 @@ from ggtune.config import (
     OPTUNA_TRIALS, OPTUNA_TIMEOUT_SEC,
     MIN_ACCEPTABLE_TG_RATIO, STABILITY_RUNS, STABILITY_CV_WARN,
 )
+
+GRID_SEARCH_THRESHOLD = OPTUNA_TRIALS  # use exhaustive grid when combos ≤ this
 from ggtune.models.bench_result import BenchResult
 from ggtune.models.model_profile import ModelProfile
 from ggtune.models.search_space import SearchSpace
@@ -23,6 +26,8 @@ from ggtune.utils.formatting import warn, info
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 console = Console()
+
+_ALL_FLAGS = frozenset({"fa", "nkvo", "ncmoe", "ctk"})
 
 
 # ── llama-bench output parser ──────────────────────────────────────────────
@@ -114,6 +119,7 @@ def _build_cmd(
     model: ModelProfile,
     params: dict,
     ctx: int = 8192,
+    avail_flags: frozenset = _ALL_FLAGS,
 ) -> List[str]:
     cmd = [
         env_cfg.llama_bench_path,
@@ -128,21 +134,23 @@ def _build_cmd(
         "-o", "csv",
     ]
 
-    # Always pass -fa explicitly: newer llama-bench defaults to "auto" when
-    # the flag is omitted (older builds defaulted to off), so an omitted
-    # flag would silently change behavior across llama.cpp versions.
-    cmd += ["-fa", "1" if params.get("flash_attn", True) else "0"]
+    # Always pass -fa explicitly when the build supports it: newer llama-bench
+    # defaults to "auto" when the flag is omitted (older builds defaulted to
+    # off), so omitting it would silently change behavior across versions.
+    if "fa" in avail_flags:
+        cmd += ["-fa", "1" if params.get("flash_attn", True) else "0"]
 
     ctk = params.get("ctk", "f16")
-    cmd += ["-ctk", ctk, "-ctv", ctk]
+    if "ctk" in avail_flags:
+        cmd += ["-ctk", ctk, "-ctv", ctk]
 
-    if model.is_moe and "ncmoe" in params:
+    if model.is_moe and "ncmoe" in params and "ncmoe" in avail_flags:
         cmd += ["-ncmoe", str(params["ncmoe"])]
 
     if not model.is_moe and "ngl" in params:
         cmd[cmd.index("999")] = str(params["ngl"])
 
-    if params.get("nkvo", False):
+    if params.get("nkvo", False) and "nkvo" in avail_flags:
         cmd += ["-nkvo"]
 
     return cmd
@@ -166,8 +174,9 @@ def run_bench(
     params: dict,
     ctx: int = 8192,
     timeout: int = 180,
+    avail_flags: frozenset = _ALL_FLAGS,
 ) -> BenchResult:
-    cmd = _build_cmd(env_cfg, model, params, ctx)
+    cmd = _build_cmd(env_cfg, model, params, ctx, avail_flags)
     t0 = time.time()
     try:
         result = subprocess.run(
@@ -212,6 +221,7 @@ def quick_probe(
     env_cfg: EnvConfig,
     model: ModelProfile,
     space: SearchSpace,
+    avail_flags: frozenset = _ALL_FLAGS,
 ) -> List[BenchResult]:
     """Coarse grid to eliminate bad regions and seed Optuna."""
 
@@ -247,7 +257,7 @@ def quick_probe(
     ) as progress:
         task = progress.add_task("Quick probe", total=len(param_grid))
         for params in param_grid:
-            r = run_bench(env_cfg, model, params)
+            r = run_bench(env_cfg, model, params, avail_flags=avail_flags)
             results.append(r)
             best = max((x.tg_tokens_per_sec for x in results if x.valid), default=0)
             status = f"{r.tg_tokens_per_sec:.1f} t/s" if r.valid else "crash"
@@ -259,6 +269,49 @@ def quick_probe(
     return results
 
 
+# ── Phase 6b-alt: Exhaustive grid search (small spaces) ───────────────────
+
+def grid_search(
+    env_cfg: EnvConfig,
+    model: ModelProfile,
+    space: SearchSpace,
+    avail_flags: frozenset = _ALL_FLAGS,
+) -> Tuple[dict, float]:
+    """Exhaustive grid — guaranteed optimal when space is small."""
+    if model.is_moe and space.ncmoe_range:
+        offload_key, offload_vals = "ncmoe", list(space.ncmoe_range)
+    elif space.ngl_range:
+        offload_key, offload_vals = "ngl", list(space.ngl_range)
+    else:
+        offload_key, offload_vals = "ngl", [999]
+    combos = list(itertools.product(
+        offload_vals, space.thread_candidates, space.kv_quant_options, space.nkvo_options
+    ))
+
+    best_params: dict = {}
+    best_tg: float = 0.0
+
+    with Progress(
+        SpinnerColumn(), TextColumn("{task.description}"),
+        BarColumn(), TextColumn("{task.completed}/{task.total}"),
+        TimeElapsedColumn(),
+    ) as progress:
+        task = progress.add_task("Grid search", total=len(combos))
+        for offload, threads, ctk, nkvo in combos:
+            params = {"flash_attn": space.flash_attn, "threads": threads, "ctk": ctk, "nkvo": nkvo,
+                      offload_key: offload}
+            r = run_bench(env_cfg, model, params, avail_flags=avail_flags)
+            if r.valid and r.tg_tokens_per_sec > best_tg:
+                best_tg = r.tg_tokens_per_sec
+                best_params = params.copy()
+            status = f"{r.tg_tokens_per_sec:.1f} t/s" if r.valid else "crash"
+            progress.update(task, advance=1, description=f"Grid search  best: {best_tg:.1f} t/s  last: {status}")
+
+    if not best_params:
+        raise RuntimeError("All grid search runs crashed.")
+    return best_params, best_tg
+
+
 # ── Phase 6b: Optuna TPE ──────────────────────────────────────────────────
 
 def optuna_search(
@@ -266,6 +319,7 @@ def optuna_search(
     model: ModelProfile,
     space: SearchSpace,
     seed_results: List[BenchResult],
+    avail_flags: frozenset = _ALL_FLAGS,
 ) -> Tuple[dict, float]:
     """Bayesian search warm-started from quick probe results."""
 
@@ -287,7 +341,7 @@ def optuna_search(
         params["ctk"] = trial.suggest_categorical("ctk", space.kv_quant_options)
         params["nkvo"] = trial.suggest_categorical("nkvo", space.nkvo_options)
 
-        result = run_bench(env_cfg, model, params)
+        result = run_bench(env_cfg, model, params, avail_flags=avail_flags)
         if result.crashed:
             return float("-inf")
         return result.tg_tokens_per_sec
@@ -366,6 +420,7 @@ def context_search(
     best_params: dict,
     space: SearchSpace,
     peak_tg: float,
+    avail_flags: frozenset = _ALL_FLAGS,
 ) -> Tuple[int, dict]:
     """Find largest context where TG >= 60% of peak."""
     candidates = space.context_candidates
@@ -392,7 +447,7 @@ def context_search(
         while lo < hi:
             mid = (lo + hi + 1) // 2
             ctx = candidates[mid]
-            r = run_bench(env_cfg, model, best_params, ctx=ctx)
+            r = run_bench(env_cfg, model, best_params, ctx=ctx, avail_flags=avail_flags)
             progress.update(task, advance=1, description=f"Context search  ctx={ctx}")
             if r.crashed or r.tg_tokens_per_sec < min_tg:
                 hi = mid - 1
@@ -401,10 +456,10 @@ def context_search(
 
     optimal_ctx = candidates[lo]
 
-    # Check if nkvo helps for the chosen context
-    if optimal_ctx > 32768 and not best_params.get("nkvo", False):
+    # Check if nkvo helps for the chosen context (only if flag is available)
+    if optimal_ctx > 32768 and not best_params.get("nkvo", False) and "nkvo" in avail_flags:
         params_nkvo = {**best_params, "nkvo": True}
-        r = run_bench(env_cfg, model, params_nkvo, ctx=optimal_ctx)
+        r = run_bench(env_cfg, model, params_nkvo, ctx=optimal_ctx, avail_flags=avail_flags)
         if r.valid and r.tg_tokens_per_sec >= min_tg:
             best_params = params_nkvo
 
@@ -418,6 +473,7 @@ def stability_pass(
     model: ModelProfile,
     best_params: dict,
     optimal_ctx: int,
+    avail_flags: frozenset = _ALL_FLAGS,
 ) -> Tuple[float, float, float]:
     """Run best params N times, return (mean_tg, std_tg, cv)."""
     tg_values = []
@@ -425,7 +481,7 @@ def stability_pass(
     with Progress(SpinnerColumn(), TextColumn("{task.description}"), BarColumn()) as progress:
         task = progress.add_task("Stability check", total=STABILITY_RUNS)
         for _ in range(STABILITY_RUNS):
-            r = run_bench(env_cfg, model, best_params, ctx=optimal_ctx)
+            r = run_bench(env_cfg, model, best_params, ctx=optimal_ctx, avail_flags=avail_flags)
             if r.valid:
                 tg_values.append(r.tg_tokens_per_sec)
             progress.advance(task)
@@ -452,23 +508,29 @@ def run_full(
     env_cfg: EnvConfig,
     model: ModelProfile,
     space: SearchSpace,
+    avail_flags: frozenset = _ALL_FLAGS,
 ) -> dict:
-    """Run all 4 phases and return result dict."""
-    # 6a
-    info("Phase 1/4: Quick probe")
-    probe_results = quick_probe(env_cfg, model, space)
+    """Run all phases and return result dict."""
+    use_grid = space.total_combinations() <= GRID_SEARCH_THRESHOLD
 
-    # 6b
-    info("Phase 2/4: Optuna TPE search")
-    best_params, peak_tg = optuna_search(env_cfg, model, space, probe_results)
+    if use_grid:
+        info("Phase 1/3: Grid search (exhaustive, small space)")
+        best_params, peak_tg = grid_search(env_cfg, model, space, avail_flags)
+        ctx_phase = "Phase 2/3"
+        stab_phase = "Phase 3/3"
+    else:
+        info("Phase 1/4: Quick probe")
+        probe_results = quick_probe(env_cfg, model, space, avail_flags)
+        info("Phase 2/4: Optuna TPE search")
+        best_params, peak_tg = optuna_search(env_cfg, model, space, probe_results, avail_flags)
+        ctx_phase = "Phase 3/4"
+        stab_phase = "Phase 4/4"
 
-    # 6c
-    info("Phase 3/4: Context binary search")
-    optimal_ctx, best_params = context_search(env_cfg, model, best_params, space, peak_tg)
+    info(f"{ctx_phase}: Context binary search")
+    optimal_ctx, best_params = context_search(env_cfg, model, best_params, space, peak_tg, avail_flags)
 
-    # 6d
-    info("Phase 4/4: Stability check")
-    mean_tg, std_tg, cv = stability_pass(env_cfg, model, best_params, optimal_ctx)
+    info(f"{stab_phase}: Stability check")
+    mean_tg, std_tg, cv = stability_pass(env_cfg, model, best_params, optimal_ctx, avail_flags)
 
     return {
         "best_params": best_params,

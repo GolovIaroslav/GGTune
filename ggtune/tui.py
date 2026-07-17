@@ -244,6 +244,10 @@ def _screen_models() -> Optional[str]:
 
     session_found: dict = {}  # path -> size_bytes, from disk scan this session
 
+    # Auto-rescan watch folders on entry
+    if model_tracker.load_scan_dirs():
+        model_tracker.rescan_dirs()
+
     while True:
         _clear()
         _banner("Models")
@@ -251,8 +255,14 @@ def _screen_models() -> Optional[str]:
         tracked = model_tracker.list_all()
         tracked_paths = {m.path for m in tracked}
 
+        def _is_mmproj_file(name: str) -> bool:
+            n = name.lower()
+            return "mmproj" in n or "ggml-vocab" in n
+
         rows: list = []
         for m in tracked:
+            if _is_mmproj_file(m.filename):
+                continue  # vision projection files are not selectable models
             vision = " [cyan]+V[/]" if m.mmproj_path and Path(m.mmproj_path).exists() else ""
             tag = "HF" if m.source_type == "downloaded" else "local"
             rows.append({"path": m.path, "filename": m.filename,
@@ -282,32 +292,34 @@ def _screen_models() -> Optional[str]:
                 "or [bold]3[/] in the main menu to download one.[/]"
             )
 
+        if platform.system() == "Windows":
+            scan_hints = "[bold]s[/bold] — scan"
+        else:
+            scan_hints = "[bold]s[/bold] — quick scan (locate)  [bold]f[/bold] — thorough scan (find)"
         console.print(
-            "\n  [dim][bold]number[/bold] — benchmark  "
-            "[bold]s[/bold] — quick scan  [bold]f[/bold] — thorough scan  "
+            f"\n  [dim][bold]number[/bold] — benchmark  {scan_hints}  "
             "[bold]d[/bold] — delete  [bold]a[/bold] — add watch folder  "
-            "[bold]r[/bold] — rescan folders  [bold]b[/bold] — back[/dim]"
+            "[bold]r[/bold] — rescan folders  [bold]v<N>[/bold] — set vision (mmproj)  "
+            "[bold]b[/bold] — back[/dim]"
         )
-        choice = _ask("").strip().lower()
+        choice = _ask("Choice: ").strip().lower()
 
         if choice in ("b", ""):
             return None
 
         elif choice == "s":
             if platform.system() == "Windows":
-                console.print("[dim]Scanning common locations...[/]")
+                console.print("[dim]Scanning folders...[/]")
+                items = _scan_gguf_files("find")
             else:
                 console.print("[dim]Scanning via locate...[/]")
-            items = _scan_gguf_files("locate")
+                items = _scan_gguf_files("locate")
             new = sum(1 for p, _ in items if p not in session_found and p not in tracked_paths)
             session_found.update({p: sz for p, sz in items})
             console.print(f"[dim]Found {len(items)} model(s), {new} new.[/]")
 
-        elif choice == "f":
-            if platform.system() == "Windows":
-                console.print("[dim]Scanning home folder and other drives — up to 60 sec...[/]")
-            else:
-                console.print("[dim]Running find — up to 30 seconds...[/]")
+        elif choice == "f" and platform.system() != "Windows":
+            console.print("[dim]Running find — up to 30 seconds...[/]")
             items = _scan_gguf_files("find")
             new = sum(1 for p, _ in items if p not in session_found and p not in tracked_paths)
             session_found.update({p: sz for p, sz in items})
@@ -347,7 +359,9 @@ def _screen_models() -> Optional[str]:
                 p = Path(folder).expanduser()
                 if p.is_dir():
                     model_tracker.add_scan_dir(str(p))
-                    console.print(f"[green]✓ Added. Press [bold]r[/] to scan it.[/]")
+                    console.print("[dim]Scanning...[/]")
+                    n = model_tracker.rescan_dirs()
+                    console.print(f"[green]✓ Added. Found {n} new model(s).[/]")
                 else:
                     console.print("[red]Directory not found.[/]")
 
@@ -355,6 +369,32 @@ def _screen_models() -> Optional[str]:
             console.print("[dim]Rescanning watch folders...[/]")
             n = model_tracker.rescan_dirs()
             console.print(f"[green]✓ Found {n} new model(s).[/]")
+
+        elif choice.startswith("v") and len(choice) > 1:
+            try:
+                idx = int(choice[1:]) - 1
+                if not rows or not (0 <= idx < len(rows)):
+                    console.print(f"[red]Enter v1–v{len(rows)}.[/]")
+                    continue
+                target = rows[idx]
+                tm = next((m for m in tracked if m.path == target["path"]), None)
+                if not tm:
+                    console.print("[red]Model not in tracker — benchmark it first to register.[/]")
+                    continue
+                cur = tm.mmproj_path
+                if cur and Path(cur).exists():
+                    console.print(f"  Current mmproj: [cyan]{cur}[/]")
+                mp_input = _ask("  Enter mmproj file path (Enter to clear): ").strip()
+                if mp_input == "":
+                    model_tracker.set_mmproj(tm.path, None)
+                    console.print("[dim]Vision file cleared.[/]")
+                elif Path(mp_input).exists():
+                    model_tracker.set_mmproj(tm.path, mp_input)
+                    console.print(f"[green]✓ Vision file set.[/]")
+                else:
+                    console.print("[red]File not found.[/]")
+            except ValueError:
+                console.print("[red]Unknown command.[/]")
 
         else:
             try:
@@ -851,21 +891,27 @@ def _screen_model_and_run(model_path: str) -> None:
     # Benchmark mode selection
     from ggtune.config import OPTUNA_TRIALS, STABILITY_RUNS
     from ggtune.modules import search_space_builder
+    from ggtune.modules.benchmark_engine import GRID_SEARCH_THRESHOLD
     try:
         space = search_space_builder.build(hw, model)
-        probe_runs = space.estimated_quick_probe_runs()
         ctx_runs = len(space.context_candidates)
-        total_runs = probe_runs + OPTUNA_TRIALS + ctx_runs + STABILITY_RUNS
-        full_est = f"~{total_runs} runs"
+        total_combos = space.total_combinations()
+        if total_combos <= GRID_SEARCH_THRESHOLD:
+            search_runs = total_combos
+        else:
+            search_runs = space.estimated_quick_probe_runs() + OPTUNA_TRIALS
+        full_est = f"~{search_runs + ctx_runs + STABILITY_RUNS} runs"
+        quick_est = f"~{search_runs + STABILITY_RUNS} runs"
         ctx_list = ", ".join(f"{c // 1024}k" for c in space.context_candidates)
         ctx_note = f"context search: {ctx_list}"
     except Exception:
         full_est = "~70 runs"
+        quick_est = "~35 runs"
         ctx_note = ""
 
     console.print(Panel(
         f"  [bold cyan][1][/]  Full benchmark   [dim]({full_est}, {ctx_note})[/]\n"
-        f"  [bold cyan][2][/]  Quick benchmark  [dim](~35 runs, skips context search)[/]\n"
+        f"  [bold cyan][2][/]  Quick benchmark  [dim]({quick_est}, skips context search)[/]\n"
         f"  [bold cyan][b][/]  Back",
         title="[bold]Benchmark Mode[/]",
         border_style="dim",
@@ -906,6 +952,15 @@ def _resolve_mmproj(model_path: str) -> Optional[str]:
         if use.lower() == "y":
             model_tracker.set_mmproj(model_path, str(mp))
             return str(mp)
+
+    # Let user specify manually
+    ans = _ask("  Specify mmproj path manually? (path or Enter to skip): ").strip()
+    if ans:
+        p = Path(ans)
+        if p.exists():
+            model_tracker.set_mmproj(model_path, str(p.resolve()))
+            return str(p.resolve())
+        console.print("[red]  File not found — skipping mmproj.[/]")
 
     return None
 

@@ -138,23 +138,27 @@ def rescan_dirs() -> int:
         dp = Path(d)
         if not dp.exists():
             continue
-        for f in dp.rglob("*.gguf"):
-            if not f.is_file() or f.stat().st_size < 50 * 1024 * 1024:
-                continue
-            if str(f.resolve()) in existing:
-                continue
-            # Auto-detect mmproj in same directory
-            mmproj = _find_mmproj_near(f)
-            register(f, source=d, mmproj_path=mmproj, source_type="local")
-            existing.add(str(f.resolve()))
-            found += 1
+        for ext in ("*.gguf", "*.bin"):
+            for f in dp.rglob(ext):
+                if not f.is_file() or f.stat().st_size < 50 * 1024 * 1024:
+                    continue
+                n = f.name.lower()
+                if "mmproj" in n or "ggml-vocab" in n:
+                    continue
+                if str(f.resolve()) in existing:
+                    continue
+                mmproj = _find_mmproj_near(f)
+                register(f, source=d, mmproj_path=mmproj, source_type="local")
+                existing.add(str(f.resolve()))
+                found += 1
     return found
 
 
 def _find_mmproj_near(model_path: Path) -> Optional[Path]:
-    """Look for mmproj .gguf files in the same directory."""
-    for f in model_path.parent.glob("mmproj*.gguf"):
-        return f
-    for f in model_path.parent.glob("*mmproj*.gguf"):
-        return f
+    """Look for mmproj .gguf files in the same directory (never returns model_path itself)."""
+    self_resolved = model_path.resolve()
+    for pattern in ("mmproj*.gguf", "*mmproj*.gguf"):
+        for f in model_path.parent.glob(pattern):
+            if f.resolve() != self_resolved:
+                return f
     return None

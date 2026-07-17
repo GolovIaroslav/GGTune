@@ -51,5 +51,13 @@ def test_dense_search_space():
 
 
 def test_oom_model_raises():
+    # ram_total_gb=8 → threshold=6.8 GB, model=12 GB → should raise
+    hw_small = HardwareProfile(
+        gpu_name="RTX 3060", vram_total_mb=6144, vram_free_mb=5800,
+        backend=Backend.CUDA, driver_version="535", compute_cap="8.6",
+        cores_physical=8, cores_logical=16,
+        cpu_name="i7-12700H", ram_total_gb=8.0, ram_available_gb=5.0,
+        os="linux", shell="zsh", hw_fingerprint="abc123",
+    )
     with pytest.raises(RuntimeError, match="won't fit"):
-        search_space_builder.build(_hw(ram_total_gb=8.0), _model_moe(size_gb=12.0))
+        search_space_builder.build(hw_small, _model_moe(size_gb=12.0))

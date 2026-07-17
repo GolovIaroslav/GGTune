@@ -61,3 +61,6 @@ def test_missing_binary_non_critical(tmp_path):
     # Should not raise even though non-critical tests fail
     assert report.all_critical_passed
     assert not report.all_passed
+    # -fa is not in bench --help output, so that non-critical test should fail
+    fa_result = next(r for r in report.results if r.test.name == "-fa flag")
+    assert not fa_result.passed
