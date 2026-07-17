@@ -92,11 +92,10 @@ COMPAT_TESTS = [
 ]
 
 
-def run_tests(bin_dir: str) -> CompatReport:
+def run_tests(bin_dir: str, build: str = LLAMA_CPP_PINNED_BUILD) -> CompatReport:
     import platform
     from ggtune.utils.shell import make_env_with_lib
     bin_path = Path(bin_dir)
-    build = LLAMA_CPP_PINNED_BUILD
     env = make_env_with_lib(bin_dir)
     results = []
     _sfx = ".exe" if platform.system() == "Windows" else ""
@@ -185,36 +184,48 @@ def check_for_changes(current_build: str) -> List[Change]:
     except ValueError:
         return []
 
-    try:
-        resp = requests.get(
-            "https://api.github.com/repos/ggml-org/llama.cpp/releases",
-            params={"per_page": 20},
-            timeout=10,
-        )
-        releases = resp.json()
-    except Exception:
-        return []
-
+    # llama.cpp cuts a build per merge, so a stale pin can be 1000+ builds
+    # behind. Page through releases (100/page, GitHub's max) until we reach
+    # the current build, capped so a very old pin can't spin forever.
     relevant = []
-    for rel in releases:
-        tag = rel.get("tag_name", "")
+    max_pages = 15
+    for page in range(1, max_pages + 1):
         try:
-            build_num = int(tag.lstrip("b"))
-        except ValueError:
-            continue
-        if build_num <= current:
+            resp = requests.get(
+                "https://api.github.com/repos/ggml-org/llama.cpp/releases",
+                params={"per_page": 100, "page": page},
+                timeout=10,
+            )
+            releases = resp.json()
+        except Exception:
+            break
+        if not isinstance(releases, list) or not releases:
             break
 
-        body = rel.get("body", "").lower()
-        matches = [p for p in WATCH_PATTERNS if p in body]
-        if matches:
-            relevant.append(Change(
-                build=build_num,
-                title=rel.get("name", tag),
-                url=rel.get("html_url", ""),
-                affected_areas=matches,
-                is_breaking="breaking" in body,
-            ))
+        reached_current = False
+        for rel in releases:
+            tag = rel.get("tag_name", "")
+            try:
+                build_num = int(tag.lstrip("b"))
+            except ValueError:
+                continue
+            if build_num <= current:
+                reached_current = True
+                break
+
+            body = rel.get("body", "").lower()
+            matches = [p for p in WATCH_PATTERNS if p in body]
+            if matches:
+                relevant.append(Change(
+                    build=build_num,
+                    title=rel.get("name", tag),
+                    url=rel.get("html_url", ""),
+                    affected_areas=matches,
+                    is_breaking="breaking" in body,
+                ))
+
+        if reached_current:
+            break
 
     return relevant
 

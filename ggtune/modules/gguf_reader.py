@@ -138,9 +138,18 @@ def read(model_path: str) -> ModelProfile:
     name = get_str("general.name") or path.stem
 
     prefix = arch
-    n_layers = get_int(f"{prefix}.block_count") or 32
+    n_layers_raw = get_int(f"{prefix}.block_count")
+    context_length_raw = get_int(f"{prefix}.context_length")
+    if n_layers_raw is None or context_length_raw is None:
+        from ggtune.utils.formatting import warn
+        warn(
+            f"Couldn't read block_count/context_length from GGUF metadata for "
+            f"architecture '{arch}' — falling back to guessed defaults. "
+            "ncmoe range and context search may be inaccurate."
+        )
+    n_layers = n_layers_raw or 32
     n_heads = get_int(f"{prefix}.attention.head_count") or 32
-    context_length_max = get_int(f"{prefix}.context_length") or 4096
+    context_length_max = context_length_raw or 4096
     n_experts_total = get_int(f"{prefix}.expert_count")
     n_experts_used = get_int(f"{prefix}.expert_used_count")
     n_kv_heads = get_int(f"{prefix}.attention.head_count_kv")

@@ -45,40 +45,29 @@ def extract_quantization(filename: str) -> str:
     return "unknown"
 
 
-def _parse_moe_info(model_id: str, tags: list) -> Tuple[bool, float]:
-    """
-    Returns (is_moe, active_fraction).
-    active_fraction = active_params / total_params, used to estimate min VRAM.
-
-    Examples: "35B-A3B" → 3/35 ≈ 0.086
-              "671B-A37B" → 37/671 ≈ 0.055
-              "22B-A3B" → 3/22 ≈ 0.136
-    """
+def _is_moe_model(model_id: str, tags: list) -> bool:
     name = model_id.upper()
     tag_set = {t.lower() for t in tags}
 
-    m = re.search(r'(\d+(?:\.\d+)?)B-A(\d+(?:\.\d+)?)B', name)
-    if m:
-        total = float(m.group(1))
-        active = float(m.group(2))
-        return True, active / total
+    if re.search(r'\d+(?:\.\d+)?B-A\d+(?:\.\d+)?B', name):
+        return True
 
-    is_moe = "moe" in tag_set or "mixture-of-experts" in tag_set
-    # MoE but can't determine ratio — assume 25% active (conservative)
-    return is_moe, 0.25
+    return "moe" in tag_set or "mixture-of-experts" in tag_set
 
 
-def _min_vram_gb(size_gb: float, active_fraction: float) -> float:
+def _min_vram_gb(size_gb: float, non_expert_frac: float = 0.30) -> float:
     """
-    Estimate minimum VRAM needed with ncmoe = n_experts_used.
+    Estimate minimum VRAM needed at maximum -ncmoe offload.
 
-    MoE model structure:
-      ~30% non-expert weights (attention, norms) → always in VRAM
-      ~70% expert weights → only active fraction in VRAM with ncmoe
+    llama.cpp's -ncmoe keeps whole LAYERS' expert weights in CPU RAM — it
+    can't selectively keep only "active" experts in VRAM (that would require
+    per-token routing decided before the layer runs). So the true floor is
+    -ncmoe set to all layers: only non-expert weights (attention, norms,
+    embed/output — roughly 30% of a MoE model) stay resident in VRAM.
 
-    Formula: size * (0.30 + 0.70 * active_fraction) * 1.15 overhead
+    Formula: size * non_expert_frac * 1.15 overhead
     """
-    return size_gb * (0.30 + 0.70 * active_fraction) * 1.15
+    return size_gb * non_expert_frac * 1.15
 
 
 def _score(quant: str, size_gb: float, vram_gb: float, fits_vram: bool, fits_ncmoe: bool) -> float:
@@ -128,7 +117,7 @@ def recommend(hw: HardwareProfile, author: str = "unsloth", vram_gb: Optional[fl
         model_id = model.get("modelId") or model.get("id", "")
         tags = model.get("tags", [])
         dl_count = model.get("downloads", 0) or 0
-        is_moe, active_fraction = _parse_moe_info(model_id, tags)
+        is_moe = _is_moe_model(model_id, tags)
 
         files = _fetch_files(model_id)
 
@@ -150,7 +139,7 @@ def recommend(hw: HardwareProfile, author: str = "unsloth", vram_gb: Optional[fl
             fits_vram = size_gb < vram * 0.9
 
             if is_moe:
-                min_vram = _min_vram_gb(size_gb, active_fraction)
+                min_vram = _min_vram_gb(size_gb)
                 fits_ncmoe = (not fits_vram) and min_vram < vram * 0.9
             else:
                 min_vram = size_gb

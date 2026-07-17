@@ -48,14 +48,14 @@ def generate_launch_cmd(
 ) -> str:
     flags = [
         f"-m {model.path}",
-        "-ngl 999",
+        f"-ngl {params['ngl'] if 'ngl' in params else 999}",
     ]
     if mmproj_path:
         flags.append(f"--mmproj {mmproj_path}")
     if model.is_moe and "ncmoe" in params:
         flags.append(f"-ncmoe {params['ncmoe']}")
     flags += [
-        "-fa on",
+        f"-fa {'on' if params.get('flash_attn', True) else 'off'}",
         f"-t {params.get('threads', 8)}",
         f"-ctk {params.get('ctk', 'f16')}",
         f"-ctv {params.get('ctk', 'f16')}",
@@ -143,13 +143,13 @@ def _build_diagnostics(
         lines.append("  [yellow]⚠  Very low quantization (Q2/IQ2) — quality is reduced. "
                      "Q4_K_M offers better balance.[/]")
 
-    # MoE ncmoe info
+    # MoE ncmoe info — ncmoe is a LAYER count (llama.cpp keeps that many
+    # layers' MoE weights in CPU RAM), not an expert count.
     if model.is_moe and "ncmoe" in params:
         ncmoe = params["ncmoe"]
-        n_total = model.n_experts_total or 256
-        in_gpu = n_total - ncmoe
-        lines.append(f"  [dim]ℹ  MoE: {in_gpu} experts in VRAM, {ncmoe} in RAM "
-                     f"(-ncmoe {ncmoe})[/]")
+        layers_on_gpu = model.n_layers - ncmoe
+        lines.append(f"  [dim]ℹ  MoE: {layers_on_gpu}/{model.n_layers} layers' experts in VRAM, "
+                     f"{ncmoe} layers in RAM (-ncmoe {ncmoe})[/]")
 
     # Thermal
     if max_cpu > 90:
@@ -198,11 +198,13 @@ def print_report(
     param_parts = []
     if model.is_moe and "ncmoe" in params:
         param_parts.append(f"-ncmoe {params['ncmoe']}")
+    elif "ngl" in params:
+        param_parts.append(f"-ngl {params['ngl']}")
     param_parts += [
         f"-t {params.get('threads', 8)}",
         f"-ctk {params.get('ctk', 'f16')}",
         f"-ctv {params.get('ctk', 'f16')}",
-        "-fa on",
+        f"-fa {'on' if params.get('flash_attn', True) else 'off'}",
     ]
     if params.get("nkvo"):
         param_parts.append("-nkvo")

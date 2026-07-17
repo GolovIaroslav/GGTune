@@ -90,6 +90,26 @@ def run(
     hw = hardware_scanner.scan()
     console.print(f"  [bold]{hw}[/]")
 
+    # llama.cpp environment (needed early: cache validity depends on the build)
+    info("Checking llama.cpp environment...")
+    try:
+        env_cfg = env_manager.detect(hw)
+        console.print(f"  llama.cpp [bold]{env_cfg.build}[/] ({env_cfg.backend.value})")
+    except RuntimeError as e:
+        if auto_build:
+            info("Installing llama.cpp...")
+            env_cfg = env_manager.install(hw)
+        else:
+            error(str(e))
+            raise SystemExit(1)
+
+    # Cached profile?
+    if not force:
+        cached = profile_storage.load(model_path, hw, env_cfg.build)
+        if cached:
+            advisor.print_cached(cached)
+            return
+
     # Model metadata
     info("Reading model...")
     model = gguf_reader.read(model_path)
@@ -102,19 +122,6 @@ def run(
             f"({hw.ram_total_gb:.1f}GB RAM total)."
         )
         raise SystemExit(1)
-
-    # llama.cpp environment
-    info("Checking llama.cpp environment...")
-    try:
-        env_cfg = env_manager.detect(hw)
-        console.print(f"  llama.cpp [bold]{env_cfg.build}[/] ({env_cfg.backend.value})")
-    except RuntimeError as e:
-        if auto_build:
-            info("Installing llama.cpp...")
-            env_cfg = env_manager.install(hw)
-        else:
-            error(str(e))
-            raise SystemExit(1)
 
     # Free up resources
     process_manager.prompt_and_kill()
@@ -169,6 +176,6 @@ def run(
     bottleneck = advisor.determine_bottleneck(hw, model, result["best_params"], result["tg_tokens_per_sec"])
 
     # Save profile
-    profile_storage.save(model, hw, result, bottleneck, total_min)
+    profile_storage.save(model, hw, result, bottleneck, total_min, env_cfg.build)
 
     advisor.print_report(model, hw, result, env_cfg, total_min, mmproj_path=mmproj_path)

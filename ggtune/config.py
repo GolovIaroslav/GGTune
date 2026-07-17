@@ -29,7 +29,7 @@ HF_API = "https://huggingface.co/api"
 RECOMMENDED_AUTHORS = ["unsloth", "bartowski"]
 
 WATCH_PATTERNS = [
-    "llama-bench", "gguf", "moe", "ncmoe",
-    "flash.att", "fa", "kv.cache", "nkvo",
-    "cuda", "cublas", "list-devices", "breaking",
+    "llama-bench", "n-cpu-moe", "ncmoe",
+    "flash-attn", "flash attention", "-ctk", "-ctv",
+    "nkvo", "kv-offload", "list-devices", "breaking change",
 ]

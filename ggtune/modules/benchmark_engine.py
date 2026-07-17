@@ -120,13 +120,18 @@ def _build_cmd(
         "-m", model.path,
         "-ngl", "999",
         "-t", str(params.get("threads", 8)),
-        "-pg", "512,128",
+        # llama-bench has no -c/--ctx-size flag: n_ctx is derived from
+        # n_prompt + n_gen + n_depth. -d simulates a conversation already
+        # filled to `ctx` tokens, so pp/tg speed is measured at that depth.
+        "-d", str(max(0, ctx)),
         "-r", str(BENCH_MEASUREMENT_RUNS),
         "-o", "csv",
     ]
 
-    if params.get("flash_attn", True):
-        cmd += ["-fa", "1"]
+    # Always pass -fa explicitly: newer llama-bench defaults to "auto" when
+    # the flag is omitted (older builds defaulted to off), so an omitted
+    # flag would silently change behavior across llama.cpp versions.
+    cmd += ["-fa", "1" if params.get("flash_attn", True) else "0"]
 
     ctk = params.get("ctk", "f16")
     cmd += ["-ctk", ctk, "-ctv", ctk]
@@ -222,7 +227,11 @@ def quick_probe(
             for ctk in space.kv_quant_options[:2]
         ]
     else:
-        ngl_vals = [999]
+        if space.ngl_range:
+            vals = list(space.ngl_range)
+            ngl_vals = [vals[0], vals[len(vals) // 2], vals[-1]] if len(vals) >= 3 else vals
+        else:
+            ngl_vals = [999]
         param_grid = [
             {"ngl": ngl, "threads": t, "ctk": ctk, "flash_attn": space.flash_attn, "nkvo": False}
             for ngl in ngl_vals
@@ -267,6 +276,10 @@ def optuna_search(
             params["ncmoe"] = trial.suggest_int(
                 "ncmoe", space.ncmoe_range.start, space.ncmoe_range.stop - 1
             )
+        elif space.ngl_range:
+            params["ngl"] = trial.suggest_int(
+                "ngl", space.ngl_range.start, space.ngl_range.stop - 1
+            )
         else:
             params["ngl"] = 999
 
@@ -296,6 +309,11 @@ def optuna_search(
                 space.ncmoe_range.start, space.ncmoe_range.stop - 1
             )
             vals["ncmoe"] = p["ncmoe"]
+        if "ngl" in p and space.ngl_range:
+            dists["ngl"] = optuna.distributions.IntDistribution(
+                space.ngl_range.start, space.ngl_range.stop - 1
+            )
+            vals["ngl"] = p["ngl"]
         if "threads" in p:
             dists["threads"] = optuna.distributions.CategoricalDistribution(space.thread_candidates)
             vals["threads"] = p["threads"]
@@ -362,7 +380,14 @@ def context_search(
         SpinnerColumn(), TextColumn("{task.description}"),
         BarColumn(), TextColumn("{task.completed}/{task.total}"),
     ) as progress:
-        task = progress.add_task("Context search", total=hi + 1)
+        task = progress.add_task("Context search", total=hi + 2)
+
+        # The binary search below assumes candidates[lo] always passes —
+        # verify the smallest candidate actually fits before trusting that.
+        r0 = run_bench(env_cfg, model, best_params, ctx=candidates[0])
+        progress.update(task, advance=1, description=f"Context search  ctx={candidates[0]}")
+        if r0.crashed or r0.tg_tokens_per_sec < min_tg:
+            return candidates[0], best_params
 
         while lo < hi:
             mid = (lo + hi + 1) // 2

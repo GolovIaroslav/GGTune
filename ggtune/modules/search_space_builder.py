@@ -60,19 +60,16 @@ def build(hw: HardwareProfile, model: ModelProfile) -> SearchSpace:
                           else CONTEXT_CANDIDATES[0]]
 
     if model.is_moe and model.n_experts_total and model.n_experts_used:
-        # ncmoe=N: N experts per layer stay in CPU RAM, (total-N) go to GPU VRAM.
-        # Low ncmoe = most experts on GPU = fast (might OOM; benchmark handles crashes).
-        # High ncmoe = most experts in CPU = uses less VRAM, much slower.
-        n_total = model.n_experts_total
-        n_used = model.n_experts_used
-
-        # Search from n_used (only the "active" quota in CPU, rest on GPU)
-        # up to n_total - n_used (keep exactly n_used experts on GPU as minimum).
-        ncmoe_min = n_used
-        ncmoe_max = n_total - n_used
+        # ncmoe=N: llama.cpp's -ncmoe/--n-cpu-moe keeps the MoE weights of the
+        # FIRST N LAYERS in CPU RAM (see llama.cpp common/arg.cpp). N is a
+        # layer count, bounded by model.n_layers — NOT an expert count.
+        # Low ncmoe = most layers' experts on GPU = fast (might OOM).
+        # High ncmoe = most layers' experts in CPU = uses less VRAM, slower.
+        ncmoe_min = 0
+        ncmoe_max = model.n_layers
 
         # ~8 probe points across the range so Optuna covers both extremes
-        step = max(n_used, (ncmoe_max - ncmoe_min) // 8)
+        step = max(1, ncmoe_max // 8)
         ncmoe_range = range(ncmoe_min, ncmoe_max + 1, step)
         return SearchSpace(
             ncmoe_range=ncmoe_range,

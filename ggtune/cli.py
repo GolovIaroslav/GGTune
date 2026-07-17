@@ -185,7 +185,7 @@ def compat(
         console.print(f"[red]{e}[/]")
         raise typer.Exit(1)
 
-    compat_report = compat_guard.run_tests(env_cfg.bin_dir)
+    compat_report = compat_guard.run_tests(env_cfg.bin_dir, env_cfg.build)
     compat_guard.print_report(compat_report)
 
     if debug:
@@ -219,7 +219,7 @@ def update(
         compat_guard.print_changes(changes, current)
         return
 
-    target = to or LLAMA_CPP_PINNED_BUILD
+    target = to or compat_guard.get_latest_build() or LLAMA_CPP_PINNED_BUILD
     console.print(f"Updating llama.cpp to [bold]{target}[/]...")
     from ggtune.modules.hardware_scanner import scan
     hw = scan()
@@ -229,7 +229,7 @@ def update(
 
     try:
         new_bin = env_manager._build_llama_cpp(hw.backend, target, temp_dir)
-        report = compat_guard.run_tests(str(new_bin))
+        report = compat_guard.run_tests(str(new_bin), target)
         if report.all_critical_passed:
             if LLAMA_INSTALL_DIR.exists():
                 shutil.move(str(LLAMA_INSTALL_DIR), str(old_dir))

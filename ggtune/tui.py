@@ -441,6 +441,8 @@ def _scan_gguf_files(search_method: str = "locate") -> List[Tuple[str, int]]:
 
     search_method: "locate" (fast, index-based) or "find" (thorough, real-time)
     """
+    from ggtune.modules import model_tracker
+
     found: dict[str, int] = {}
 
     def _add(p: Path) -> None:
@@ -462,6 +464,7 @@ def _scan_gguf_files(search_method: str = "locate") -> List[Tuple[str, int]]:
     common_dirs = [
         home / "models",
         home / "Downloads",
+        home / ".lmstudio" / "models",  # LM Studio's actual default, all OSes
         home / ".cache" / "lm-studio" / "models",
         home / ".local" / "share" / "models",
     ]
@@ -470,7 +473,6 @@ def _scan_gguf_files(search_method: str = "locate") -> List[Tuple[str, int]]:
         common_dirs += [
             home / "Documents" / "models",
             home / "Desktop",
-            home / "AppData" / "Local" / "LM Studio" / "models",
             home / ".ollama" / "models",
         ]
         # Also scan drive roots D:\, E:\ (C:\ is slow and mostly system files)
@@ -483,6 +485,8 @@ def _scan_gguf_files(search_method: str = "locate") -> List[Tuple[str, int]]:
     else:
         common_dirs.append(Path("/data"))
         common_dirs.append(home / ".ollama" / "models")
+
+    common_dirs += [Path(p) for p in model_tracker.load_scan_dirs()]
 
     for d in common_dirs:
         if d.exists():

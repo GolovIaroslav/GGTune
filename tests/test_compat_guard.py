@@ -1,7 +1,11 @@
 """Tests for compat guard — mocked subprocess."""
+import platform
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 import subprocess
 from ggtune.modules.compat_guard import run_tests, COMPAT_TESTS
+
+_SFX = ".exe" if platform.system() == "Windows" else ""
 
 
 def _make_proc(stdout="", returncode=0):
@@ -14,8 +18,8 @@ def _make_proc(stdout="", returncode=0):
 
 def test_all_pass(tmp_path):
     # Create fake binaries
-    bench = tmp_path / "llama-bench"
-    cli = tmp_path / "llama-cli"
+    bench = tmp_path / f"llama-bench{_SFX}"
+    cli = tmp_path / f"llama-cli{_SFX}"
     bench.touch()
     cli.touch()
 
@@ -25,7 +29,7 @@ def test_all_pass(tmp_path):
     }
 
     def fake_run(cmd, **kwargs):
-        name = cmd[0].split("/")[-1]
+        name = Path(cmd[0]).stem
         return _make_proc(stdout=outputs.get(name, ""))
 
     with patch("subprocess.run", side_effect=fake_run):
@@ -35,16 +39,25 @@ def test_all_pass(tmp_path):
 
 
 def test_missing_binary_non_critical(tmp_path):
-    bench = tmp_path / "llama-bench"
-    cli = tmp_path / "llama-cli"
+    bench = tmp_path / f"llama-bench{_SFX}"
+    cli = tmp_path / f"llama-cli{_SFX}"
     bench.touch()
     cli.touch()
 
+    # Critical tests (--list-devices, llama-bench --help) pass; non-critical
+    # ones (-fa, -ncmoe, -nkvo flags) are absent from the --help text.
+    outputs = {
+        "llama-cli": "Available devices:\n  CPU (default)\n  CUDA0: RTX 3060",
+        "llama-bench": "Usage: llama-bench -m model",
+    }
+
     def fake_run(cmd, **kwargs):
-        return _make_proc(stdout="Usage: llama-bench -m model -fa 1")
+        name = Path(cmd[0]).stem
+        return _make_proc(stdout=outputs.get(name, ""))
 
     with patch("subprocess.run", side_effect=fake_run):
         report = run_tests(str(tmp_path))
 
-    # Should not raise even if non-critical tests fail
-    assert isinstance(report.all_critical_passed, bool)
+    # Should not raise even though non-critical tests fail
+    assert report.all_critical_passed
+    assert not report.all_passed

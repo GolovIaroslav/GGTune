@@ -44,20 +44,50 @@ WARN_UNSAVED = {"google-chrome", "chromium", "firefox", "code"}
 
 def _input_timed(timeout: int = 60) -> Optional[str]:
     """Read a line from stdin with a timeout. Returns None on timeout."""
+    sys.stdout.flush()
+    if sys.platform == "win32":
+        return _input_timed_windows(timeout)
     try:
         import select as _sel
-        sys.stdout.flush()
         ready, _, _ = _sel.select([sys.stdin], [], [], timeout)
         if ready:
             return sys.stdin.readline().strip().lower()
         print(f"\n  [auto-skipped after {timeout}s]")
         return None
     except Exception:
-        # Windows or unusual environment — fall back to plain input (no timeout)
+        # Unusual environment — fall back to plain input (no timeout)
         try:
             return input().strip().lower()
         except (EOFError, KeyboardInterrupt):
             return None
+
+
+def _input_timed_windows(timeout: int) -> Optional[str]:
+    """Windows has no select() on stdin — poll msvcrt.kbhit() instead."""
+    try:
+        import msvcrt
+    except ImportError:
+        try:
+            return input().strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+    buf: list[str] = []
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if msvcrt.kbhit():
+            ch = msvcrt.getwche()
+            if ch in ("\r", "\n"):
+                print()
+                return "".join(buf).strip().lower()
+            elif ch == "\b":
+                if buf:
+                    buf.pop()
+            else:
+                buf.append(ch)
+        time.sleep(0.05)
+    print(f"\n  [auto-skipped after {timeout}s]")
+    return None
 
 
 def _gpu_mem_by_pid() -> Dict[int, int]:
@@ -91,8 +121,8 @@ def _find_hungry() -> List[_Group]:
     gpu_pids = set(gpu_mem)
     groups: Dict[str, dict] = {}
 
-    try:
-        for proc in psutil.process_iter(["pid", "name", "memory_info"]):
+    for proc in psutil.process_iter(["pid", "name", "memory_info"]):
+        try:
             pid = proc.info["pid"]
             raw_name = proc.info["name"] or ""
             name_lower = raw_name.lower()
@@ -144,8 +174,10 @@ def _find_hungry() -> List[_Group]:
             if has_gpu:
                 groups[group_key]["has_gpu"] = True
                 groups[group_key]["vram_mb"] += gpu_mem.get(pid, 0)
-    except Exception:
-        pass
+        except Exception:
+            # A single process may vanish/deny access mid-iteration — skip it,
+            # don't abort scanning of the remaining processes.
+            continue
 
     result: List[_Group] = []
     for key, g in groups.items():

@@ -7,7 +7,7 @@ from typing import Optional
 
 import filelock
 
-from ggtune.config import CONFIG_DIR, PROFILES_DIR, LLAMA_CPP_PINNED_BUILD
+from ggtune.config import CONFIG_DIR, PROFILES_DIR
 from ggtune.models.hardware import HardwareProfile
 from ggtune.models.model_profile import ModelProfile
 from ggtune.models.profile import StoredProfile
@@ -32,7 +32,7 @@ def _profile_path(profile_id: str) -> Path:
     return PROFILES_DIR / f"{profile_id}.json"
 
 
-def load(model_path: str, hw: HardwareProfile) -> Optional[StoredProfile]:
+def load(model_path: str, hw: HardwareProfile, current_build: str) -> Optional[StoredProfile]:
     """Return cached profile or None if missing/stale/invalid."""
     try:
         profile_id = compute_profile_id(model_path, hw)
@@ -52,7 +52,7 @@ def load(model_path: str, hw: HardwareProfile) -> Optional[StoredProfile]:
     if datetime.now() - created_at > timedelta(days=STALE_DAYS):
         return None
 
-    if data.get("llama_cpp_build") != LLAMA_CPP_PINNED_BUILD:
+    if data.get("llama_cpp_build") != current_build:
         return None
 
     try:
@@ -67,6 +67,7 @@ def save(
     result: dict,
     bottleneck: str,
     total_bench_time_min: float,
+    llama_cpp_build: str,
 ) -> StoredProfile:
     PROFILES_DIR.mkdir(parents=True, exist_ok=True)
     profile_id = compute_profile_id(model.path, hw)
@@ -93,7 +94,7 @@ def save(
         bottleneck=bottleneck,
         optuna_trials=result.get("optuna_trials", 0),
         total_bench_time_min=total_bench_time_min,
-        llama_cpp_build=LLAMA_CPP_PINNED_BUILD,
+        llama_cpp_build=llama_cpp_build,
         optimal_context=result.get("optimal_ctx", 8192),
     )
 
