@@ -27,6 +27,27 @@ def max_practical_ctx(hw: HardwareProfile, model: ModelProfile) -> int:
     return int(ram_for_kv_mb / mb_per_tok)
 
 
+def _estimate_ngl_floor(hw: HardwareProfile, model: ModelProfile) -> int:
+    """Rough floor for how many layers need to stay on GPU to fit in VRAM.
+
+    Dense models at very low ngl run almost entirely on CPU, which is not
+    just slower to run but disproportionately slow to even *benchmark*
+    (minutes per probe point on a big model) compared to a GPU-heavy config.
+    When the model clearly fits, skip probing near-CPU points we're already
+    confident won't win — start the search close to full offload instead.
+    """
+    if model.n_layers <= 0:
+        return 0
+    per_layer_gb = model.file_size_gb / model.n_layers
+    if per_layer_gb <= 0:
+        return 0
+    vram_budget_gb = hw.vram_free_mb / 1024 * 0.85  # headroom for KV cache/CUDA overhead
+    fit_layers = int(vram_budget_gb / per_layer_gb)
+    # Keep a small window below the naive estimate — KV cache/context can
+    # eat into the budget in ways this rough per-layer estimate misses.
+    return max(0, min(model.n_layers, fit_layers) - 4)
+
+
 def _thread_candidates(hw: HardwareProfile) -> List[int]:
     center = hw.cores_physical
     candidates = sorted({
@@ -84,7 +105,8 @@ def build(hw: HardwareProfile, model: ModelProfile,
             flash_attn=flash_attn,
         )
     else:
-        ngl_range = range(0, model.n_layers + 1)
+        ngl_floor = _estimate_ngl_floor(hw, model)
+        ngl_range = range(ngl_floor, model.n_layers + 1)
         return SearchSpace(
             ngl_range=ngl_range,
             thread_candidates=threads,

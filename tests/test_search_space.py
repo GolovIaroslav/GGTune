@@ -50,6 +50,27 @@ def test_dense_search_space():
     assert space.ncmoe_range is None
 
 
+def test_dense_ngl_range_is_actually_searched():
+    """Regression: ngl used to be hardcoded to 999 everywhere and never searched."""
+    space = search_space_builder.build(_hw(), _model_dense())
+    assert space.total_combinations() > 1
+    assert len(list(space.ngl_range)) > 1
+
+
+def test_dense_ngl_floor_narrows_when_vram_generous():
+    """When the model clearly fits, don't waste time probing near-CPU ngl values
+    (those are disproportionately slow to even benchmark, not just to run)."""
+    space = search_space_builder.build(_hw(vram_free_mb=20000), _model_dense(size_gb=8.0))
+    assert space.ngl_range.start > 0
+    assert space.ngl_range.stop == 33  # n_layers + 1, full offload always reachable
+
+
+def test_dense_ngl_floor_stays_zero_when_vram_scarce():
+    """When VRAM can't hold much of the model, the low end must stay searchable."""
+    space = search_space_builder.build(_hw(vram_free_mb=500), _model_dense(size_gb=8.0))
+    assert space.ngl_range.start == 0
+
+
 def test_oom_model_raises():
     # ram_total_gb=8 → threshold=6.8 GB, model=12 GB → should raise
     hw_small = HardwareProfile(
