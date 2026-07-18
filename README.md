@@ -20,8 +20,9 @@ You give it a GGUF file. It runs `llama-bench` with different combinations of `-
 
 - Python 3.10+
 - NVIDIA GPU with CUDA (AMD/Apple planned)
-- Linux or macOS
-- `git`, `cmake`, CUDA toolkit (for building llama.cpp)
+- Windows, Linux, or macOS
+- On Windows/macOS, `ggtune update` downloads a pre-built llama.cpp — no toolchain needed.
+  On Linux (or if no pre-built binary exists for your platform), it builds from source and needs `git`, `cmake`, and the CUDA toolkit.
 
 ---
 
@@ -63,6 +64,8 @@ CLI commands also work if you prefer:
 ```bash
 ggtune run /path/to/model.gguf        # full benchmark
 ggtune quick /path/to/model.gguf      # ~5 min quick version
+ggtune serve /path/to/model.gguf      # launch llama-server with the best known settings
+ggtune export /path/to/model.gguf     # save the launch command as a .bat/.sh script
 ggtune browse                          # find models on HuggingFace
 ggtune scan                            # find .gguf files on disk
 ggtune info /path/to/model.gguf       # model metadata
@@ -70,7 +73,8 @@ ggtune hw                              # hardware info
 ggtune show                            # saved profiles
 ggtune clear --all                     # clear profile cache
 ggtune compat                          # test llama.cpp binaries
-ggtune update                          # update llama.cpp
+ggtune update                          # update llama.cpp to the latest release
+ggtune update --check                  # see relevant llama.cpp changes since your build
 ggtune help                            # show all commands
 ```
 
