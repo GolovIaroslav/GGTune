@@ -474,9 +474,10 @@ def stability_pass(
     best_params: dict,
     optimal_ctx: int,
     avail_flags: frozenset = _ALL_FLAGS,
-) -> Tuple[float, float, float]:
-    """Run best params N times, return (mean_tg, std_tg, cv)."""
+) -> Tuple[float, float, float, float]:
+    """Run best params N times, return (mean_tg, std_tg, cv, mean_pp)."""
     tg_values = []
+    pp_values = []
 
     with Progress(SpinnerColumn(), TextColumn("{task.description}"), BarColumn()) as progress:
         task = progress.add_task("Stability check", total=STABILITY_RUNS)
@@ -484,14 +485,17 @@ def stability_pass(
             r = run_bench(env_cfg, model, best_params, ctx=optimal_ctx, avail_flags=avail_flags)
             if r.valid:
                 tg_values.append(r.tg_tokens_per_sec)
+                if r.pp_tokens_per_sec > 0:
+                    pp_values.append(r.pp_tokens_per_sec)
             progress.advance(task)
 
     if not tg_values:
-        return 0.0, 0.0, 1.0
+        return 0.0, 0.0, 1.0, 0.0
 
     mean_tg = statistics.mean(tg_values)
     std_tg = statistics.stdev(tg_values) if len(tg_values) > 1 else 0.0
     cv = std_tg / mean_tg if mean_tg > 0 else 0.0
+    mean_pp = statistics.mean(pp_values) if pp_values else 0.0
 
     if cv > STABILITY_CV_WARN:
         warn(
@@ -499,7 +503,7 @@ def stability_pass(
             "Background processes may be interfering."
         )
 
-    return mean_tg, std_tg, cv
+    return mean_tg, std_tg, cv, mean_pp
 
 
 # ── Full pipeline ──────────────────────────────────────────────────────────
@@ -530,11 +534,12 @@ def run_full(
     optimal_ctx, best_params = context_search(env_cfg, model, best_params, space, peak_tg, avail_flags)
 
     info(f"{stab_phase}: Stability check")
-    mean_tg, std_tg, cv = stability_pass(env_cfg, model, best_params, optimal_ctx, avail_flags)
+    mean_tg, std_tg, cv, mean_pp = stability_pass(env_cfg, model, best_params, optimal_ctx, avail_flags)
 
     return {
         "best_params": best_params,
         "tg_tokens_per_sec": mean_tg,
+        "pp_tokens_per_sec": mean_pp,
         "tg_std": std_tg,
         "stability_cv": cv,
         "optimal_ctx": optimal_ctx,

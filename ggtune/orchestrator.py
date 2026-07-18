@@ -169,10 +169,11 @@ def run(
                 info("Quick mode: probe + Optuna only (no context search)")
                 probe = benchmark_engine.quick_probe(env_cfg, model, space, avail_flags)
                 best_params, peak_tg = benchmark_engine.optuna_search(env_cfg, model, space, probe, avail_flags)
-            mean_tg, std_tg, cv = benchmark_engine.stability_pass(env_cfg, model, best_params, 8192, avail_flags)
+            mean_tg, std_tg, cv, mean_pp = benchmark_engine.stability_pass(env_cfg, model, best_params, 8192, avail_flags)
             result = {
                 "best_params": best_params,
                 "tg_tokens_per_sec": mean_tg,
+                "pp_tokens_per_sec": mean_pp,
                 "tg_std": std_tg,
                 "stability_cv": cv,
                 "optimal_ctx": 8192,

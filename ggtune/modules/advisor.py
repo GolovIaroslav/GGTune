@@ -11,7 +11,7 @@ from rich.rule import Rule
 from rich.table import Table
 from rich import box
 
-from typing import Optional
+from typing import List, Optional
 
 from ggtune.models.hardware import HardwareProfile, Backend
 from ggtune.models.model_profile import ModelProfile
@@ -40,6 +40,43 @@ def _bottleneck_text(bottleneck: str) -> str:
     }.get(bottleneck, bottleneck)
 
 
+def build_launch_argv(
+    model: ModelProfile,
+    params: dict,
+    optimal_ctx: int,
+    env_cfg: EnvConfig,
+    mmproj_path: Optional[str] = None,
+) -> List[str]:
+    """Argv for actually spawning llama-server — each arg its own list item
+
+    (safe for paths with spaces, unlike the display string from
+    generate_launch_cmd which is meant for copy-paste into a shell).
+    """
+    argv = [
+        env_cfg.llama_server_path,
+        "-m", model.path,
+        "-ngl", str(params["ngl"] if "ngl" in params else 999),
+    ]
+    if mmproj_path:
+        argv += ["--mmproj", mmproj_path]
+    if model.is_moe and "ncmoe" in params:
+        argv += ["-ncmoe", str(params["ncmoe"])]
+    argv += [
+        "-fa", "on" if params.get("flash_attn", True) else "off",
+        "-t", str(params.get("threads", 8)),
+        "-ctk", params.get("ctk", "f16"),
+        "-ctv", params.get("ctk", "f16"),
+    ]
+    if params.get("nkvo"):
+        argv.append("-nkvo")
+    argv += [
+        "-c", str(optimal_ctx),
+        "--jinja",
+        "--port", "8080",
+    ]
+    return argv
+
+
 def generate_launch_cmd(
     model: ModelProfile,
     params: dict,
@@ -47,33 +84,25 @@ def generate_launch_cmd(
     env_cfg: EnvConfig,
     mmproj_path: Optional[str] = None,
 ) -> str:
-    flags = [
-        f"-m {model.path}",
-        f"-ngl {params['ngl'] if 'ngl' in params else 999}",
-    ]
-    if mmproj_path:
-        flags.append(f"--mmproj {mmproj_path}")
-    if model.is_moe and "ncmoe" in params:
-        flags.append(f"-ncmoe {params['ncmoe']}")
-    flags += [
-        f"-fa {'on' if params.get('flash_attn', True) else 'off'}",
-        f"-t {params.get('threads', 8)}",
-        f"-ctk {params.get('ctk', 'f16')}",
-        f"-ctv {params.get('ctk', 'f16')}",
-    ]
-    if params.get("nkvo"):
-        flags.append("-nkvo")
-    flags += [
-        f"-c {optimal_ctx}",
-        "--jinja",
-        "--port 8080",
-    ]
+    """Human-readable command string for copy-paste into a shell."""
+    argv = build_launch_argv(model, params, optimal_ctx, env_cfg, mmproj_path)
+
+    parts = []
+    i = 1  # argv[0] is the binary path, handled separately below
+    while i < len(argv):
+        tok = argv[i]
+        if tok.startswith("-") and i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+            parts.append(f"{tok} {argv[i + 1]}")
+            i += 2
+        else:
+            parts.append(tok)
+            i += 1
 
     if _SYSTEM == "Windows":
-        return f"{env_cfg.llama_server_path} {' '.join(flags)}"
+        return f"{argv[0]} {' '.join(parts)}"
     else:
         ld = f"LD_LIBRARY_PATH={env_cfg.bin_dir}:$LD_LIBRARY_PATH"
-        return f"{ld} {env_cfg.llama_server_path} {' '.join(flags)}"
+        return f"{ld} {argv[0]} {' '.join(parts)}"
 
 
 def _build_diagnostics(
@@ -189,6 +218,7 @@ def print_report(
 ) -> str:
     params = result["best_params"]
     tg = result["tg_tokens_per_sec"]
+    pp = result.get("pp_tokens_per_sec", 0.0)
     std = result.get("tg_std", 0.0)
     cv = result.get("stability_cv", 0.0)
     ctx = result.get("optimal_ctx", 8192)
@@ -211,15 +241,21 @@ def print_report(
 
     launch_cmd = generate_launch_cmd(model, params, ctx, env_cfg, mmproj_path)
 
+    results_lines = [f"  TG speed:   [bold green]{tg:.1f} t/s[/]  (±{std:.1f}, CV={cv:.1%})"]
+    if pp > 0:
+        results_lines.append(f"  PP speed:   [bold green]{pp:.1f} t/s[/]")
+    results_lines += [
+        f"  Context:    [bold]{ctx:,} tokens[/]",
+        f"  Bottleneck: {_bottleneck_text(bottleneck)}",
+    ]
+
     lines = [
         f"[bold]Model:[/]    {model}",
         f"[bold]Hardware:[/] {hw}",
         f"[bold]Duration:[/] {total_min:.0f} min",
         "",
         "[bold cyan]RESULTS[/]",
-        f"  TG speed:   [bold green]{tg:.1f} t/s[/]  (±{std:.1f}, CV={cv:.1%})",
-        f"  Context:    [bold]{ctx:,} tokens[/]",
-        f"  Bottleneck: {_bottleneck_text(bottleneck)}",
+        *results_lines,
         "",
         "[bold cyan]PARAMETERS[/]",
         f"  {param_str}",
@@ -242,11 +278,14 @@ def print_report(
 
 
 def print_cached(profile: StoredProfile) -> None:
+    pp_line = (f"  PP speed:  [bold green]{profile.pp_tokens_per_sec:.1f} t/s[/]\n"
+               if profile.pp_tokens_per_sec > 0 else "")
     console.print(Panel(
         f"[bold]Model:[/] {profile.model_name} ({profile.model_quantization})\n"
         f"[bold]GPU:[/]   {profile.hw_gpu_name}\n\n"
         f"[bold cyan]Cached results[/] (from {profile.created_at[:10]})\n"
         f"  TG speed:  [bold green]{profile.tg_tokens_per_sec:.1f} t/s[/]\n"
+        f"{pp_line}"
         f"  Context:   {profile.optimal_context:,} tokens\n"
         f"  Params:    {json_params(profile.best_params)}\n\n"
         "[dim]Use --force to re-run benchmark.[/]",

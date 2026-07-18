@@ -53,6 +53,119 @@ def quick(
 
 
 @app.command()
+def serve(
+    model: str = typer.Argument(..., help="Path to .gguf model file"),
+    open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the web UI once the server is ready"),
+) -> None:
+    """Launch llama-server with the best known settings (run 'ggtune run' first)."""
+    import subprocess
+    import time
+    import webbrowser
+    from ggtune.modules import hardware_scanner, env_manager, profile_storage, gguf_reader, model_tracker, advisor
+    from ggtune.utils.formatting import error, info
+
+    hw = hardware_scanner.scan()
+    try:
+        env_cfg = env_manager.detect(hw)
+    except RuntimeError as e:
+        error(str(e))
+        raise typer.Exit(1)
+
+    cached = profile_storage.load(model, hw, env_cfg.build)
+    if not cached:
+        error(
+            "No benchmark profile for this model on this hardware/llama.cpp build.\n"
+            "  Run [bold]ggtune run[/] (or [bold]ggtune quick[/]) first."
+        )
+        raise typer.Exit(1)
+
+    model_profile = gguf_reader.read(model)
+    mmproj_path = None
+    tracked = model_tracker.find_by_path(model)
+    if tracked and tracked.mmproj_path and Path(tracked.mmproj_path).exists():
+        mmproj_path = tracked.mmproj_path
+
+    argv = advisor.build_launch_argv(
+        model_profile, cached.best_params, cached.optimal_context, env_cfg, mmproj_path,
+    )
+    console.print(f"[dim]{' '.join(argv)}[/]")
+    info(f"Starting llama-server ({cached.tg_tokens_per_sec:.1f} t/s expected)...")
+
+    proc = subprocess.Popen(argv, env=env_cfg.env_dict)
+    try:
+        if open_browser:
+            time.sleep(4)
+            webbrowser.open("http://localhost:8080")
+        proc.wait()
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopping llama-server...[/]")
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+@app.command()
+def export(
+    model: str = typer.Argument(..., help="Path to .gguf model file"),
+    out: Optional[str] = typer.Option(None, "--out", "-o", help="Output script path (default: alongside the model)"),
+) -> None:
+    """Save the best known launch command as a runnable script (.bat / .sh)."""
+    import platform
+    import stat
+    from ggtune.modules import hardware_scanner, env_manager, profile_storage, gguf_reader, model_tracker, advisor
+    from ggtune.utils.formatting import error, success
+
+    hw = hardware_scanner.scan()
+    try:
+        env_cfg = env_manager.detect(hw)
+    except RuntimeError as e:
+        error(str(e))
+        raise typer.Exit(1)
+
+    cached = profile_storage.load(model, hw, env_cfg.build)
+    if not cached:
+        error(
+            "No benchmark profile for this model on this hardware/llama.cpp build.\n"
+            "  Run [bold]ggtune run[/] (or [bold]ggtune quick[/]) first."
+        )
+        raise typer.Exit(1)
+
+    model_profile = gguf_reader.read(model)
+    mmproj_path = None
+    tracked = model_tracker.find_by_path(model)
+    if tracked and tracked.mmproj_path and Path(tracked.mmproj_path).exists():
+        mmproj_path = tracked.mmproj_path
+
+    argv = advisor.build_launch_argv(
+        model_profile, cached.best_params, cached.optimal_context, env_cfg, mmproj_path,
+    )
+
+    is_windows = platform.system() == "Windows"
+    ext = ".bat" if is_windows else ".sh"
+    out_path = Path(out) if out else Path(model).with_suffix("").with_name(Path(model).stem + "-serve" + ext)
+
+    if is_windows:
+        quoted = " ".join(f'"{a}"' if " " in a else a for a in argv)
+        script = f"@echo off\r\n{quoted}\r\n"
+    else:
+        import shlex
+        quoted = shlex.join(argv)
+        script = (
+            "#!/bin/sh\n"
+            f'export LD_LIBRARY_PATH="{env_cfg.bin_dir}:$LD_LIBRARY_PATH"\n'
+            f"{quoted}\n"
+        )
+
+    out_path.write_text(script)
+    if not is_windows:
+        out_path.chmod(out_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    success(f"Saved to {out_path}")
+
+
+@app.command()
 def browse(
     author: str = typer.Option("unsloth", "--author", help="HuggingFace author to search"),
     vram: Optional[float] = typer.Option(None, "--vram", help="Override VRAM GB"),
@@ -228,13 +341,25 @@ def update(
     old_dir = LLAMA_INSTALL_DIR.parent / "llama.cpp.old"
 
     try:
-        new_bin = env_manager._build_llama_cpp(hw.backend, target, temp_dir)
+        new_bin = None
+        if env_manager.prebuilt_available():
+            console.print(f"  [dim]Downloading pre-built {target}...[/]")
+            new_bin = env_manager.download_prebuilt(hw.backend, target, temp_dir)
+            if new_bin is None:
+                console.print("  [yellow]No pre-built binary available — building from source instead.[/]")
+        if new_bin is None:
+            new_bin = env_manager._build_llama_cpp(hw.backend, target, temp_dir)
+
         report = compat_guard.run_tests(str(new_bin), target)
         if report.all_critical_passed:
             if LLAMA_INSTALL_DIR.exists():
+                shutil.rmtree(str(old_dir), ignore_errors=True)
                 shutil.move(str(LLAMA_INSTALL_DIR), str(old_dir))
-            shutil.move(str(temp_dir), str(LLAMA_INSTALL_DIR))
-            env_manager._save_env_json(new_bin, target, hw.backend)
+            # Move just the bin directory into place — temp_dir may also
+            # hold source/checkout cruft (source-build case) we don't keep.
+            shutil.move(str(new_bin), str(LLAMA_INSTALL_DIR))
+            shutil.rmtree(str(temp_dir), ignore_errors=True)
+            env_manager._save_env_json(LLAMA_INSTALL_DIR, target, hw.backend)
             console.print(f"[green]✓ Updated to {target}[/]")
         else:
             console.print(f"[red]Compat tests failed for {target}. Keeping {current}.[/]")

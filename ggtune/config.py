@@ -1,6 +1,6 @@
 from pathlib import Path
 
-LLAMA_CPP_PINNED_BUILD = "b9014"
+LLAMA_CPP_PINNED_BUILD = "b10066"  # fallback default; `ggtune update` fetches the true latest dynamically
 LLAMA_CPP_REPO = "https://github.com/ggml-org/llama.cpp"
 
 CONFIG_DIR = Path.home() / ".llamatune"
